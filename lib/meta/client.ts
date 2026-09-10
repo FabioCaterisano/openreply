@@ -622,7 +622,7 @@ export async function getMediaPermalink(
   mediaId: string
 ): Promise<string | null> {
   const url = new URL(`${instagramGraphBase()}/${mediaId}`);
-  url.searchParams.set("fields", "id,permalink,media_product_type");
+  url.searchParams.set("fields", "id,permalink");
   try {
     const response = await fetch(url.toString(), {
       method: "GET",

@@ -1401,14 +1401,15 @@ describe("durable Zernio postback delivery", () => {
 });
 
 describe("CATNO drop resolution", () => {
+  // Upstream stores the primary tracked link with this fixed label (see
+  // app/api/automations/route.ts); the button title comes from linkButtonLabel.
   const libraryLink = {
     slug: "lib123",
-    label: "Alle Drops",
+    label: "Primary campaign link",
     destinationUrl: "https://catno.ai/free?src=dm",
   };
 
   beforeEach(() => {
-    process.env.FREE_LIBRARY_URL = "https://catno.ai/free";
     mockGetMediaPermalink.mockResolvedValue(
       "https://www.instagram.com/reel/DQx1AbC2dEf/"
     );
@@ -1427,7 +1428,7 @@ describe("CATNO drop resolution", () => {
         ...mockAutomation,
         matchAnyPost: true,
         keywords: ["DROP"],
-        linkButtonLabel: "Drop aus dem Reel",
+        linkButtonLabel: "Alle Drops 🔓",
         trackedLinks: [libraryLink],
       },
     ]);
@@ -1452,17 +1453,17 @@ describe("CATNO drop resolution", () => {
       title: "Drop aus dem Reel",
       url: "https://decks.catno.ai/gpt-weiss-alles/?src=dm",
     });
-    expect(buttons[1].title).toBe("Alle Drops");
+    expect(buttons[1].title).toBe("Alle Drops 🔓");
     expect(buttons[1].url).toMatch(/\/r\/lib123\?k=27$/);
   });
 
-  it("labels an unlabeled library link 'Alle Drops 🔓' when a handout takes button 0", async () => {
+  it("falls back to upstream's 'Open link' for the library button when no label exists", async () => {
     mockPrisma.automation.findMany.mockResolvedValue([
       {
         ...mockAutomation,
         matchAnyPost: true,
         keywords: ["DROP"],
-        linkButtonLabel: "Drop aus dem Reel",
+        linkButtonLabel: null,
         trackedLinks: [{ ...libraryLink, label: null }],
       },
     ]);
@@ -1474,7 +1475,8 @@ describe("CATNO drop resolution", () => {
 
     const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
     expect(buttons).toHaveLength(2);
-    expect(buttons[1].title).toBe("Alle Drops 🔓");
+    expect(buttons[0].title).toBe("Drop aus dem Reel");
+    expect(buttons[1].title).toBe("Open link");
   });
 
   it("keeps the handout and k in the inline fallback when the button template is rejected", async () => {
@@ -1483,7 +1485,7 @@ describe("CATNO drop resolution", () => {
         ...mockAutomation,
         matchAnyPost: true,
         keywords: ["DROP"],
-        linkButtonLabel: "Drop aus dem Reel",
+        linkButtonLabel: "Alle Drops 🔓",
         trackedLinks: [libraryLink],
       },
     ]);
@@ -1499,8 +1501,10 @@ describe("CATNO drop resolution", () => {
     expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
     // meta.sendPrivateReply(token, igId, commentId, message)
     const text = mockSendPrivateReply.mock.calls[0][3] as string;
-    expect(text).toContain("https://decks.catno.ai/gpt-weiss-alles/?src=dm");
-    expect(text).toMatch(/\/r\/lib123\?k=27(\s|$)/);
+    expect(text).toContain(
+      "Drop aus dem Reel: https://decks.catno.ai/gpt-weiss-alles/?src=dm"
+    );
+    expect(text).toMatch(/Alle Drops 🔓: \S*\/r\/lib123\?k=27(\s|$)/);
     expect(text.indexOf("decks.catno.ai")).toBeLessThan(text.indexOf("/r/lib123"));
   });
 
@@ -1509,7 +1513,7 @@ describe("CATNO drop resolution", () => {
     mockPrisma.automation.findFirst.mockResolvedValue({
       ...mockAutomation,
       requireFollow: true,
-      linkButtonLabel: "Drop aus dem Reel",
+      linkButtonLabel: "Alle Drops 🔓",
       trackedLinks: [libraryLink],
     });
     mockPrisma.dmLog.findFirst.mockResolvedValue({
@@ -1529,7 +1533,11 @@ describe("CATNO drop resolution", () => {
 
     // meta.sendDirectMessageWithLinkButton(token, igId, userId, text, buttons)
     const buttons = mockSendDirectMessageWithLinkButton.mock.calls[0][4];
-    expect(buttons[0].url).toBe("https://decks.catno.ai/gpt-weiss-alles/?src=dm");
+    expect(buttons[0]).toEqual({
+      title: "Drop aus dem Reel",
+      url: "https://decks.catno.ai/gpt-weiss-alles/?src=dm",
+    });
+    expect(buttons[1].title).toBe("Alle Drops 🔓");
     expect(buttons[1].url).toMatch(/\/r\/lib123\?k=27$/);
   });
 
@@ -1541,6 +1549,7 @@ describe("CATNO drop resolution", () => {
         ...mockAutomation,
         matchAnyPost: true,
         keywords: ["DROP"],
+        linkButtonLabel: "Alle Drops 🔓",
         trackedLinks: [libraryLink],
       },
     ]);
@@ -1552,6 +1561,7 @@ describe("CATNO drop resolution", () => {
 
     const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
     expect(buttons).toHaveLength(1);
+    expect(buttons[0].title).toBe("Alle Drops 🔓");
     expect(buttons[0].url).toMatch(/\/r\/lib123$/);
   });
 });

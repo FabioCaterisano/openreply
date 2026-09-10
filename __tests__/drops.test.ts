@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   instagramShortcode,
   parseDropNumber,
-  libraryUrl,
   __resetDropsCache,
 } from "@/lib/drops/catalog";
 import { resolveDrop } from "@/lib/drops/resolve";
@@ -35,6 +34,14 @@ const CATALOG = {
       instagram_url: null,
       status: "draft",
     },
+    {
+      drop_number: 42,
+      slug: "insecure",
+      title: "Kein https",
+      handout_url: "http://decks.catno.ai/insecure/",
+      instagram_url: "https://www.instagram.com/reel/HTTPonly1234/",
+      status: "public",
+    },
   ],
 };
 
@@ -56,14 +63,6 @@ describe("parseDropNumber", () => {
     expect(parseDropNumber("Drop27")).toBe(27);
     expect(parseDropNumber("DROP")).toBeNull();
     expect(parseDropNumber("ich will 27")).toBeNull();
-  });
-});
-
-describe("libraryUrl", () => {
-  it("appends k and src", () => {
-    process.env.FREE_LIBRARY_URL = "https://catno.ai/free";
-    expect(libraryUrl(27)).toBe("https://catno.ai/free?k=27&src=dm");
-    expect(libraryUrl(null)).toBe("https://catno.ai/free?src=dm");
   });
 });
 
@@ -100,6 +99,16 @@ describe("resolveDrop", () => {
   it("ignores non-public drops and returns null when nothing matches", async () => {
     expect(await resolveDrop({ permalink: null, commentText: "DROP 99" })).toBeNull();
     expect(await resolveDrop({ permalink: null, commentText: "DROP" })).toBeNull();
+  });
+
+  it("ignores drops whose handout_url is not https", async () => {
+    expect(
+      await resolveDrop({
+        permalink: "https://www.instagram.com/reel/HTTPonly1234/",
+        commentText: "DROP",
+      })
+    ).toBeNull();
+    expect(await resolveDrop({ permalink: null, commentText: "DROP 42" })).toBeNull();
   });
 
   it("caches the catalog between calls", async () => {

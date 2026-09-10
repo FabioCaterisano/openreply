@@ -10,7 +10,7 @@ services:
     env_file: .env
     environment:
       NODE_ENV: production
-    ports:
+    expose:
       - "3000"
     depends_on:
       postgres:
@@ -25,6 +25,7 @@ services:
       start_period: 60s
 
   worker:
+    build: .
     image: openreply-catno:latest
     restart: unless-stopped
     command: ["npm", "run", "worker"]
@@ -40,6 +41,7 @@ services:
         condition: service_healthy
 
   cron:
+    build: .
     image: openreply-catno:latest
     restart: unless-stopped
     command: ["sh", "scripts/cron.sh"]

@@ -54,6 +54,10 @@ import {
 
 const BACKOFF_DELAYS = [5 * 60 * 1000, 15 * 60 * 1000, 45 * 60 * 1000];
 
+// CATNO: title of the handout button (button 0 when a drop resolved). Meta caps
+// button titles at 20 characters. The library button keeps `linkButtonLabel`.
+const DROP_BUTTON_TITLE = process.env.DROP_BUTTON_LABEL || "Drop aus dem Reel";
+
 function formatError(error: unknown): string {
   if (error instanceof MetaApiError) {
     return `${error.name} ${error.code}: ${error.message}`;
@@ -107,39 +111,38 @@ function withQuery(url: string, query?: Record<string, string>): string {
 }
 
 /**
- * Build the tappable link buttons for a DM. Without an override the first link
- * uses the campaign's `linkButtonLabel` and each additional link its own stored
- * `label`. With an override, button 0 is the resolved handout (untracked) and
- * the tracked links follow — an unlabeled tracked link is then the library
- * button ("Alle Drops 🔓", spec §3.7). Capped at Meta's 3-button limit.
+ * Build the tappable link buttons for a DM. The first tracked link uses the
+ * campaign's `linkButtonLabel` and each additional link its own stored `label`
+ * (upstream behaviour). With an override, the resolved handout (untracked,
+ * titled DROP_BUTTON_TITLE) is prepended as button 0 and the tracked links keep
+ * their upstream titles — so the library button reads `linkButtonLabel` in
+ * both cases (spec §3.7). Capped at Meta's 3-button limit.
  */
 function buildLinkButtons(
   trackedLinks: WorkerTrackedLink[],
   primaryLabel: string | null,
   override?: LinkButtonOverride
 ): { title: string; url: string }[] {
-  if (override?.primaryUrl) {
-    const tracked = trackedLinks.map((link) => ({
-      url: withQuery(buildTrackedUrl(link.slug), override.query),
-      title: link.label || "Alle Drops 🔓",
-    }));
-    return [
-      { title: primaryLabel || "Open link", url: withQuery(override.primaryUrl, { src: "dm" }) },
-      ...tracked,
-    ].slice(0, 3);
-  }
-  return trackedLinks.slice(0, 3).map((link, index) => ({
+  const tracked = trackedLinks.map((link, index) => ({
     url: withQuery(buildTrackedUrl(link.slug), override?.query),
     title:
       (index === 0 ? primaryLabel : link.label) || link.label || "Open link",
   }));
+  if (override?.primaryUrl) {
+    return [
+      { title: DROP_BUTTON_TITLE, url: withQuery(override.primaryUrl, { src: "dm" }) },
+      ...tracked,
+    ].slice(0, 3);
+  }
+  return tracked.slice(0, 3);
 }
 
 /**
  * Fallback text when Meta rejects the button template: render the primary link
  * inline, then append any extra tracked URLs on their own lines so no link is
  * lost. With an override (CATNO handout) the links mirror `buildLinkButtons`:
- * the handout comes first, labelled, then every tracked link with `k`.
+ * the handout comes first as DROP_BUTTON_TITLE, then every tracked link with
+ * its upstream label and `k`.
  */
 function buildInlineLinkFallback(
   message: string,
@@ -151,10 +154,10 @@ function buildInlineLinkFallback(
 ): string {
   if (override?.primaryUrl) {
     const lines = [
-      `${primaryLabel || "Open link"}: ${withQuery(override.primaryUrl, { src: "dm" })}`,
+      `${DROP_BUTTON_TITLE}: ${withQuery(override.primaryUrl, { src: "dm" })}`,
       ...trackedLinks.map(
-        (link) =>
-          `${link.label || "Alle Drops 🔓"}: ${withQuery(buildTrackedUrl(link.slug), override.query)}`
+        (link, index) =>
+          `${(index === 0 ? primaryLabel : link.label) || link.label || "Open link"}: ${withQuery(buildTrackedUrl(link.slug), override.query)}`
       ),
     ];
     return `${bodyText}\n${lines.join("\n")}`;

@@ -58,12 +58,3 @@ export function parseDropNumber(commentText: string): number | null {
   const match = DROP_NUMBER_RE.exec(commentText ?? "");
   return match ? Number(match[1]) : null;
 }
-
-/** Library deep link for the second (fixed) button. */
-export function libraryUrl(dropNumber: number | null): string {
-  const base = process.env.FREE_LIBRARY_URL ?? "https://catno.ai/free";
-  const params = new URLSearchParams();
-  if (dropNumber != null) params.set("k", String(dropNumber));
-  params.set("src", "dm");
-  return `${base}?${params.toString()}`;
-}
