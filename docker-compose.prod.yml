@@ -1,0 +1,82 @@
+# OpenReply — production stack for Coolify (Docker Compose resource).
+# One image, three processes (web, worker, cron) + Postgres + Redis.
+# Migrations run in the web start command, never in the build (no DB at build time).
+services:
+  web:
+    build: .
+    image: openreply-catno:latest
+    restart: unless-stopped
+    command: ["sh", "-c", "npx prisma migrate deploy && npm run start"]
+    env_file: .env
+    environment:
+      NODE_ENV: production
+    ports:
+      - "3000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O-", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+
+  worker:
+    image: openreply-catno:latest
+    restart: unless-stopped
+    command: ["npm", "run", "worker"]
+    env_file: .env
+    environment:
+      NODE_ENV: production
+    # Not on web: /api/health answers 503 until the worker heartbeat exists,
+    # so a worker that waits for a healthy web never starts (verified locally).
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  cron:
+    image: openreply-catno:latest
+    restart: unless-stopped
+    command: ["sh", "scripts/cron.sh"]
+    env_file: .env
+    environment:
+      CRON_BASE_URL: http://web:3000
+    depends_on:
+      web:
+        condition: service_healthy
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: openreply
+      POSTGRES_USER: openreply
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - openreply_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openreply"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - openreply_redis:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  openreply_pgdata:
+  openreply_redis:
