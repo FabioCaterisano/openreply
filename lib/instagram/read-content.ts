@@ -120,6 +120,18 @@ export async function getAllUserMedia({
     : getUserMedia({ context, limit: max });
 }
 
+export async function getMediaPermalink({
+  context,
+  mediaId,
+}: {
+  context: InstagramContext;
+  mediaId: string;
+}): Promise<string | null> {
+  if (context.provider === "META")
+    return meta.getMediaPermalink(context.accessToken, mediaId);
+  return null;
+}
+
 export async function getUserInfo({
   context,
 }: {

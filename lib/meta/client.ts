@@ -613,6 +613,30 @@ export async function getAllUserMedia(
 }
 
 /**
+ * Permalink of a single media object. Used to map a comment's media id to the
+ * reel URL stored in the CATNO drops catalog. Returns null on any error so the
+ * caller can fall back to keyword parsing.
+ */
+export async function getMediaPermalink(
+  accessToken: string,
+  mediaId: string
+): Promise<string | null> {
+  const url = new URL(`${instagramGraphBase()}/${mediaId}`);
+  url.searchParams.set("fields", "id,permalink,media_product_type");
+  try {
+    const response = await fetch(url.toString(), {
+      method: "GET",
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!response.ok) return null;
+    const data = (await response.json()) as { permalink?: string };
+    return typeof data.permalink === "string" ? data.permalink : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Fetch per-media insight metrics (views, reach, saved, shares, etc.).
  *
  * Requires the `instagram_business_manage_insights` permission — accounts

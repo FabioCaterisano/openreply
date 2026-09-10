@@ -5,6 +5,13 @@ vi.mock("@/lib/db/client", () => ({
 vi.mock("@/lib/meta/oauth", () => ({
   decryptToken: (value: string) => `decrypted:${value}`,
 }));
+const { mockGetMediaPermalink } = vi.hoisted(() => ({
+  mockGetMediaPermalink: vi.fn(),
+}));
+vi.mock("@/lib/meta/client", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/meta/client")>()),
+  getMediaPermalink: mockGetMediaPermalink,
+}));
 import {
   createInstagramContext,
   sendPrivateReplyWithButton,
@@ -279,4 +286,26 @@ it('treats a lost public-reply response as unconfirmed instead of safe to repeat
   respond({ data: {} });
   await expect(sendCommentReply({ context, commentId: 'comment', postId: 'post', message: 'Thanks' })).rejects.toMatchObject({ name: 'ZernioDeliveryUnconfirmedError' });
   expect(fetchMock).toHaveBeenCalledTimes(2);
+});
+
+describe("getMediaPermalink", () => {
+  it("delegates to meta for META contexts", async () => {
+    mockGetMediaPermalink.mockResolvedValue("https://www.instagram.com/reel/ABC123/");
+    const { getMediaPermalink } = await import("@/lib/instagram/provider");
+    const url = await getMediaPermalink({
+      context: { provider: "META", accessToken: "tok" },
+      mediaId: "1789",
+    });
+    expect(mockGetMediaPermalink).toHaveBeenCalledWith("tok", "1789");
+    expect(url).toBe("https://www.instagram.com/reel/ABC123/");
+  });
+
+  it("returns null for ZERNIO contexts", async () => {
+    const { getMediaPermalink } = await import("@/lib/instagram/provider");
+    const url = await getMediaPermalink({
+      context: { provider: "ZERNIO", apiKey: "k", accountId: "a", instagramId: "i" },
+      mediaId: "1789",
+    });
+    expect(url).toBeNull();
+  });
 });
