@@ -77,4 +77,48 @@ describe("tracked link redirect route", () => {
     expect(response.headers.get("location")).toBe("https://manychat-alternative.com/");
     expect(mockPrisma.linkClick.create).not.toHaveBeenCalled();
   });
+
+  it("forwards the k query parameter to the destination", async () => {
+    mockPrisma.trackedLink.findUnique.mockResolvedValue({
+      id: "tl1",
+      slug: "lib123",
+      destinationUrl: "https://catno.ai/free?src=dm",
+      automationId: "a",
+      workspaceId: "w",
+      automation: { instagramAccountId: "ia" },
+    });
+    mockPrisma.linkClick.create.mockResolvedValue({});
+
+    const response = await GET(
+      new Request("https://reply.catno.ai/r/lib123?k=27") as Parameters<
+        typeof GET
+      >[0],
+      { params: Promise.resolve({ slug: "lib123" }) }
+    );
+
+    expect(response.headers.get("location")).toBe(
+      "https://catno.ai/free?src=dm&k=27"
+    );
+  });
+
+  it("drops a non-numeric k instead of forwarding it", async () => {
+    mockPrisma.trackedLink.findUnique.mockResolvedValue({
+      id: "tl1",
+      slug: "lib123",
+      destinationUrl: "https://catno.ai/free?src=dm",
+      automationId: "a",
+      workspaceId: "w",
+      automation: { instagramAccountId: "ia" },
+    });
+    mockPrisma.linkClick.create.mockResolvedValue({});
+
+    const response = await GET(
+      new Request("https://reply.catno.ai/r/lib123?k=evil%22") as Parameters<
+        typeof GET
+      >[0],
+      { params: Promise.resolve({ slug: "lib123" }) }
+    );
+
+    expect(response.headers.get("location")).toBe("https://catno.ai/free?src=dm");
+  });
 });

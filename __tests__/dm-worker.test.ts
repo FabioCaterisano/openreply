@@ -15,6 +15,8 @@ const {
   mockQueueAdd,
   mockReserveWorkspaceDMSend,
   mockReleaseWorkspaceDMReservation,
+  mockResolveDrop,
+  mockGetMediaPermalink,
 } = vi.hoisted(() => ({
   mockPrisma: {
     zernioConnection: { findUnique: vi.fn() },
@@ -50,6 +52,8 @@ const {
   mockQueueAdd: vi.fn(),
   mockReserveWorkspaceDMSend: vi.fn(),
   mockReleaseWorkspaceDMReservation: vi.fn(),
+  mockResolveDrop: vi.fn(),
+  mockGetMediaPermalink: vi.fn(),
 }));
 
 vi.mock("@/lib/db/client", () => ({
@@ -65,6 +69,8 @@ vi.mock("@/lib/meta/client", () => ({
   sendDirectMessage: mockSendDirectMessage,
   sendDirectMessageWithLinkButton: mockSendDirectMessageWithLinkButton,
   sendCommentReply: vi.fn(),
+  // The provider barrel routes META contexts to this function (read-content.ts).
+  getMediaPermalink: mockGetMediaPermalink,
   MetaApiError: class MetaApiError extends Error {
     code: number;
     constructor(
@@ -92,6 +98,10 @@ vi.mock("@/lib/meta/oauth", () => ({
 
 vi.mock("@/lib/utils/keyword-matcher", () => ({
   matchKeywords: mockMatchKeywords,
+}));
+
+vi.mock("@/lib/drops/resolve", () => ({
+  resolveDrop: mockResolveDrop,
 }));
 
 vi.mock("@/lib/utils/rate-limiter", () => ({
@@ -1387,5 +1397,134 @@ describe("durable Zernio postback delivery", () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe("CATNO drop resolution", () => {
+  const libraryLink = {
+    slug: "lib123",
+    label: "Alle Drops",
+    destinationUrl: "https://catno.ai/free?src=dm",
+  };
+
+  beforeEach(() => {
+    process.env.FREE_LIBRARY_URL = "https://catno.ai/free";
+    mockGetMediaPermalink.mockResolvedValue(
+      "https://www.instagram.com/reel/DQx1AbC2dEf/"
+    );
+    mockResolveDrop.mockResolvedValue({
+      dropNumber: 27,
+      slug: "gpt-weiss-alles",
+      handoutUrl: "https://decks.catno.ai/gpt-weiss-alles/",
+      matchedBy: "permalink",
+    });
+  });
+
+  it("persists media + drop on the comment log and puts the handout on button 0", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(true);
+    mockPrisma.automation.findMany.mockResolvedValue([
+      {
+        ...mockAutomation,
+        matchAnyPost: true,
+        keywords: ["DROP"],
+        linkButtonLabel: "Drop aus dem Reel",
+        trackedLinks: [libraryLink],
+      },
+    ]);
+
+    const processor = getProcessor();
+    await processor(
+      createMockJob({ ...mockJobData, commentText: "DROP", mediaId: "media_1" })
+    );
+
+    expect(mockResolveDrop).toHaveBeenCalledWith({
+      permalink: "https://www.instagram.com/reel/DQx1AbC2dEf/",
+      commentText: "DROP",
+    });
+    const logCreate =
+      mockPrisma.dmLog.create.mock.calls.at(-1)?.[0] ??
+      mockPrisma.dmLog.upsert.mock.calls.at(-1)?.[0];
+    expect(JSON.stringify(logCreate)).toContain('"dropNumber":27');
+    expect(JSON.stringify(logCreate)).toContain('"mediaId":"media_1"');
+
+    const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
+    expect(buttons[0]).toEqual({
+      title: "Drop aus dem Reel",
+      url: "https://decks.catno.ai/gpt-weiss-alles/?src=dm",
+    });
+    expect(buttons[1].title).toBe("Alle Drops");
+    expect(buttons[1].url).toMatch(/\/r\/lib123\?k=27$/);
+  });
+
+  it("labels an unlabeled library link 'Alle Drops 🔓' when a handout takes button 0", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      {
+        ...mockAutomation,
+        matchAnyPost: true,
+        keywords: ["DROP"],
+        linkButtonLabel: "Drop aus dem Reel",
+        trackedLinks: [{ ...libraryLink, label: null }],
+      },
+    ]);
+
+    const processor = getProcessor();
+    await processor(
+      createMockJob({ ...mockJobData, commentText: "DROP", mediaId: "media_1" })
+    );
+
+    const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
+    expect(buttons).toHaveLength(2);
+    expect(buttons[1].title).toBe("Alle Drops 🔓");
+  });
+
+  it("uses the persisted drop when the follow-gate postback reveals the link", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(true);
+    mockPrisma.automation.findFirst.mockResolvedValue({
+      ...mockAutomation,
+      requireFollow: true,
+      linkButtonLabel: "Drop aus dem Reel",
+      trackedLinks: [libraryLink],
+    });
+    mockPrisma.dmLog.findFirst.mockResolvedValue({
+      commenterName: "tester",
+      dropUrl: "https://decks.catno.ai/gpt-weiss-alles/",
+      dropNumber: 27,
+    });
+
+    const processor = getProcessor();
+    await processor(
+      createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "followcheck:auto_789",
+      })
+    );
+
+    // meta.sendDirectMessageWithLinkButton(token, igId, userId, text, buttons)
+    const buttons = mockSendDirectMessageWithLinkButton.mock.calls[0][4];
+    expect(buttons[0].url).toBe("https://decks.catno.ai/gpt-weiss-alles/?src=dm");
+    expect(buttons[1].url).toMatch(/\/r\/lib123\?k=27$/);
+  });
+
+  it("sends only the library button when nothing resolves", async () => {
+    mockResolveDrop.mockResolvedValue(null);
+    mockGetUserFollowStatus.mockResolvedValue(true);
+    mockPrisma.automation.findMany.mockResolvedValue([
+      {
+        ...mockAutomation,
+        matchAnyPost: true,
+        keywords: ["DROP"],
+        trackedLinks: [libraryLink],
+      },
+    ]);
+
+    const processor = getProcessor();
+    await processor(
+      createMockJob({ ...mockJobData, commentText: "DROP", mediaId: "media_x" })
+    );
+
+    const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
+    expect(buttons).toHaveLength(1);
+    expect(buttons[0].url).toMatch(/\/r\/lib123$/);
   });
 });

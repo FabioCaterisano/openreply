@@ -31,6 +31,8 @@ import {
   hasInstagramCredentials,
   type InstagramContext,
 } from "@/lib/instagram/provider";
+import { resolveDrop } from "@/lib/drops/resolve";
+import { getMediaPermalink } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 import { reserveDMSlot } from "@/lib/utils/rate-limiter";
 import {
@@ -90,17 +92,43 @@ type WorkerTrackedLink = {
   destinationUrl: string;
 };
 
+export type LinkButtonOverride = {
+  /** CATNO: untracked handout URL for button 0; the first tracked link is then pushed to button 1. */
+  primaryUrl?: string | null;
+  /** Query params appended to every tracked /r/<slug> URL (forwarded by the redirect). */
+  query?: Record<string, string>;
+};
+
+function withQuery(url: string, query?: Record<string, string>): string {
+  if (!query || Object.keys(query).length === 0) return url;
+  const sep = url.includes("?") ? "&" : "?";
+  return `${url}${sep}${new URLSearchParams(query).toString()}`;
+}
+
 /**
- * Build the tappable link buttons for a DM. The first link uses the campaign's
- * `linkButtonLabel`; each additional link uses its own stored `label`. Capped at
- * Meta's 3-button limit for a button template.
+ * Build the tappable link buttons for a DM. Without an override the first link
+ * uses the campaign's `linkButtonLabel` and each additional link its own stored
+ * `label`. With an override, button 0 is the resolved handout (untracked) and
+ * the tracked links follow — an unlabeled tracked link is then the library
+ * button ("Alle Drops 🔓", spec §3.7). Capped at Meta's 3-button limit.
  */
 function buildLinkButtons(
   trackedLinks: WorkerTrackedLink[],
-  primaryLabel: string | null
+  primaryLabel: string | null,
+  override?: LinkButtonOverride
 ): { title: string; url: string }[] {
+  if (override?.primaryUrl) {
+    const tracked = trackedLinks.map((link) => ({
+      url: withQuery(buildTrackedUrl(link.slug), override.query),
+      title: link.label || "Alle Drops 🔓",
+    }));
+    return [
+      { title: primaryLabel || "Open link", url: withQuery(override.primaryUrl, { src: "dm" }) },
+      ...tracked,
+    ].slice(0, 3);
+  }
   return trackedLinks.slice(0, 3).map((link, index) => ({
-    url: buildTrackedUrl(link.slug),
+    url: withQuery(buildTrackedUrl(link.slug), override?.query),
     title:
       (index === 0 ? primaryLabel : link.label) || link.label || "Open link",
   }));
@@ -144,12 +172,15 @@ async function sendRevealDirectMessage({
   userId,
   commenterName,
   context,
+  linkOverride,
 }: {
   accessToken: InstagramContext;
   automation: RevealAutomation;
   userId: string;
   commenterName: string | null;
   context: string;
+  /** CATNO: handout resolved at comment time (postback path only). */
+  linkOverride?: LinkButtonOverride;
 }): Promise<void> {
   if (automation.trackedLinks.length === 0) {
     await sendDirectMessage({
@@ -173,7 +204,8 @@ async function sendRevealDirectMessage({
     }) || "Here's your link:";
   const buttons = buildLinkButtons(
     automation.trackedLinks,
-    automation.linkButtonLabel
+    automation.linkButtonLabel,
+    linkOverride
   );
 
   try {
@@ -360,6 +392,30 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       continue;
     }
 
+    // CATNO: which handout belongs to the reel this comment sits under?
+    // Permalink match first, number after DROP second, null = library only.
+    // Resolved before the log row is written so the follow-gate postback can
+    // read it back later. Never lets a lookup failure block the DM itself.
+    let drop: Awaited<ReturnType<typeof resolveDrop>> = null;
+    if (needsDm) {
+      try {
+        const permalink = await getMediaPermalink({ context: accessToken, mediaId });
+        drop = await resolveDrop({ permalink, commentText });
+      } catch (error) {
+        console.log("[DM Worker] Drop resolution failed, library only:", formatError(error));
+      }
+    }
+    const dropFields = {
+      mediaId,
+      dropNumber: drop?.dropNumber ?? null,
+      dropSlug: drop?.slug ?? null,
+      dropUrl: drop?.handoutUrl ?? null,
+    };
+    const linkOverride: LinkButtonOverride = {
+      primaryUrl: drop?.handoutUrl ?? null,
+      query: drop ? { k: String(drop.dropNumber) } : {},
+    };
+
     // Ensure a log row exists before the public reply leg (which updates it).
     // Only (re)set PENDING when the DM will actually be attempted, so a prior
     // SENT is never clobbered while we come back just to retry the public reply.
@@ -374,6 +430,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           commentText,
           commentId,
           matchedKeyword: matchResult.matchedKeyword,
+          ...dropFields,
           status: "PENDING",
           attempts: job.attemptsMade + 1,
         },
@@ -387,6 +444,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           status: "PENDING",
           attempts: job.attemptsMade + 1,
           matchedKeyword: matchResult.matchedKeyword,
+          ...dropFields,
           errorMessage: null,
         },
       });
@@ -642,7 +700,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           }) || "Here's your link:";
         const buttons = buildLinkButtons(
           automation.trackedLinks,
-          automation.linkButtonLabel
+          automation.linkButtonLabel,
+          linkOverride
         );
 
         try {
@@ -835,12 +894,26 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
       return;
   }
 
-  // Personalize {username} from the opening DM log for this user, if present.
+  // Personalize {username} and pick up the CATNO drop resolved at comment time.
+  // Latest row for this user, excluding this path's own reveal row: it is newer
+  // than the comment on a repeat tap and carries no drop.
   const openingLog = await prisma.dmLog.findFirst({
-    where: { automationId: automation.id, commenterId: userId },
-    select: { commenterName: true },
+    where: {
+      automationId: automation.id,
+      commenterId: userId,
+      commentId: { not: dedupeId },
+    },
+    orderBy: { createdAt: "desc" },
+    select: { commenterName: true, dropUrl: true, dropNumber: true },
   });
   const commenterName = openingLog?.commenterName ?? null;
+  const linkOverride: LinkButtonOverride = {
+    primaryUrl: openingLog?.dropUrl ?? null,
+    query:
+      openingLog?.dropNumber != null
+        ? { k: String(openingLog.dropNumber) }
+        : {},
+  };
 
   let accessToken: InstagramContext;
   try {
@@ -944,6 +1017,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
           userId: userId,
           commenterName: commenterName,
           context: "postback",
+          linkOverride,
         }),
     });
     if (!delivered) {

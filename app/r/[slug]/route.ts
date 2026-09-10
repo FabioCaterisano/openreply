@@ -39,5 +39,11 @@ export async function GET(request: NextRequest, { params }: RedirectRouteProps) 
     },
   });
 
-  return NextResponse.redirect(trackedLink.destinationUrl, { status: 302 });
+  // CATNO: forward the drop number (`k`) from the DM button to the library so
+  // the landing page can spotlight that drop. Numeric only — nothing else from
+  // the request reaches the destination.
+  const destination = new URL(trackedLink.destinationUrl);
+  const k = new URL(request.url).searchParams.get("k");
+  if (k && /^\d{1,4}$/.test(k)) destination.searchParams.set("k", k);
+  return NextResponse.redirect(destination.toString(), { status: 302 });
 }
