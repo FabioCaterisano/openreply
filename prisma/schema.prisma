@@ -231,6 +231,12 @@ model DmLog {
   commentText   String
   commentId     String
   matchedKeyword String?
+  // CATNO: which reel triggered this comment and which handout it resolved to.
+  // Persisted here because the postback (follow-gate) path only knows the user.
+  mediaId    String?
+  dropNumber Int?
+  dropSlug   String?
+  dropUrl    String?
   status        DmStatus @default(PENDING)
   attempts      Int      @default(0)
   dmSentAt      DateTime?
@@ -256,6 +262,7 @@ model DmLog {
   @@index([automationId])
   @@index([instagramAccountId])
   @@index([status])
+  @@index([automationId, commenterId, createdAt])
 }
 
 // Legacy reconciliation model; currently unwired. Runtime code does not read
