@@ -43,6 +43,7 @@ describe("instagramShortcode", () => {
     expect(instagramShortcode("https://www.instagram.com/reel/DQx1AbC2dEf/?igsh=abc")).toBe("DQx1AbC2dEf");
     expect(instagramShortcode("https://instagram.com/p/DQx1AbC2dEf")).toBe("DQx1AbC2dEf");
     expect(instagramShortcode("https://www.instagram.com/reels/DQx1AbC2dEf/#x")).toBe("DQx1AbC2dEf");
+    expect(instagramShortcode("https://www.instagram.com/catno.ai/reel/DQx1AbC2dEf/")).toBe("DQx1AbC2dEf");
     expect(instagramShortcode("https://www.instagram.com/catno.ai/")).toBeNull();
     expect(instagramShortcode(null)).toBeNull();
   });

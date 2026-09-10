@@ -41,7 +41,8 @@ export async function loadDrops(): Promise<Drop[]> {
   }
 }
 
-const SHORTCODE_RE = /instagram\.com\/(?:reel|reels|p)\/([A-Za-z0-9_-]+)/;
+// Optional profile segment: share links look like /<username>/reel/<code>/.
+const SHORTCODE_RE = /instagram\.com\/(?:[^/?#]+\/)?(?:reel|reels|p)\/([A-Za-z0-9_-]+)/;
 
 /** Shortcode of a reel/post URL, or null when it is not a media URL. */
 export function instagramShortcode(url: string | null | undefined): string | null {
