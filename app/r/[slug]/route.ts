@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/db/client";
 import { getRequestIp, hashClickIp } from "@/lib/tracking/server";
+import { emitEvent } from "@/lib/events/emit";
 
 type RedirectRouteProps = {
   params: Promise<{ slug: string }>;
@@ -42,8 +43,11 @@ export async function GET(request: NextRequest, { params }: RedirectRouteProps) 
   // CATNO: forward the drop number (`k`) from the DM button to the library so
   // the landing page can spotlight that drop. Numeric only — nothing else from
   // the request reaches the destination.
+  const rawK = new URL(request.url).searchParams.get("k");
+  const k = rawK && /^\d{1,4}$/.test(rawK) ? rawK : null;
+  void emitEvent("link.clicked", { slug, destinationUrl: trackedLink.destinationUrl, k });
+
   const destination = new URL(trackedLink.destinationUrl);
-  const k = new URL(request.url).searchParams.get("k");
-  if (k && /^\d{1,4}$/.test(k)) destination.searchParams.set("k", k);
+  if (k) destination.searchParams.set("k", k);
   return NextResponse.redirect(destination.toString(), { status: 302 });
 }

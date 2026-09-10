@@ -32,6 +32,7 @@ import {
   type InstagramContext,
 } from "@/lib/instagram/provider";
 import { resolveDrop } from "@/lib/drops/resolve";
+import { emitEvent } from "@/lib/events/emit";
 import { getMediaPermalink } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 import { reserveDMSlot } from "@/lib/utils/rate-limiter";
@@ -708,6 +709,11 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           payload: `followcheck:${automation.id}`,
           postId: mediaId,
         });
+        void emitEvent("follow_prompt.sent", {
+          automationId: automation.id,
+          commenterId,
+          mediaId,
+        });
       } else if (automation.trackedLinks.length > 0) {
         // Try button template first; if Meta rejects it, fall back to inline links.
         const bodyText =
@@ -790,6 +796,15 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           dmSentAt: new Date(),
           errorMessage: null,
         },
+      });
+      void emitEvent("comment.matched", {
+        automationId: automation.id,
+        commenterId,
+        commenterName,
+        commentId,
+        mediaId,
+        dropNumber: drop?.dropNumber ?? null,
+        dropSlug: drop?.slug ?? null,
       });
     } catch (error) {
       await releaseWorkspaceDMReservation(
@@ -1088,6 +1103,11 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
       },
       update: { status: "SENT", dmSentAt: new Date(), errorMessage: null },
     });
+    void emitEvent("link.delivered", {
+      automationId: automation.id,
+      userId,
+      dropNumber: openingLog?.dropNumber ?? null,
+    });
   } catch (error) {
     await releaseWorkspaceDMReservation(
       automation.workspaceId,
@@ -1181,6 +1201,7 @@ async function processFollowUp(job: Job<ProcessFollowUpJob>): Promise<void> {
         commenterName: commenterName ?? null,
       }),
     });
+    void emitEvent("followup.sent", { automationId: automation.id, userId });
   } catch (error) {
     console.log(
       "[DM Worker] Failed to send follow-up message:",
