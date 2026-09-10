@@ -137,20 +137,33 @@ function buildLinkButtons(
 /**
  * Fallback text when Meta rejects the button template: render the primary link
  * inline, then append any extra tracked URLs on their own lines so no link is
- * lost.
+ * lost. With an override (CATNO handout) the links mirror `buildLinkButtons`:
+ * the handout comes first, labelled, then every tracked link with `k`.
  */
 function buildInlineLinkFallback(
   message: string,
   commenterName: string | null | undefined,
   trackedLinks: WorkerTrackedLink[],
-  bodyText: string
+  bodyText: string,
+  primaryLabel?: string | null,
+  override?: LinkButtonOverride
 ): string {
+  if (override?.primaryUrl) {
+    const lines = [
+      `${primaryLabel || "Open link"}: ${withQuery(override.primaryUrl, { src: "dm" })}`,
+      ...trackedLinks.map(
+        (link) =>
+          `${link.label || "Alle Drops 🔓"}: ${withQuery(buildTrackedUrl(link.slug), override.query)}`
+      ),
+    ];
+    return `${bodyText}\n${lines.join("\n")}`;
+  }
   const base =
     renderMessageWithTracking({ message, commenterName, trackedLinks }) ||
     bodyText;
   const extraUrls = trackedLinks
     .slice(1)
-    .map((link) => buildTrackedUrl(link.slug));
+    .map((link) => withQuery(buildTrackedUrl(link.slug), override?.query));
   return extraUrls.length > 0 ? `${base}\n${extraUrls.join("\n")}` : base;
 }
 
@@ -234,7 +247,9 @@ async function sendRevealDirectMessage({
           automation.dmMessage,
           commenterName,
           automation.trackedLinks,
-          bodyText
+          bodyText,
+          automation.linkButtonLabel,
+          linkOverride
         ),
       });
     } catch {
@@ -444,7 +459,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           status: "PENDING",
           attempts: job.attemptsMade + 1,
           matchedKeyword: matchResult.matchedKeyword,
-          ...dropFields,
+          // A transient permalink/catalog failure on a retry must not null a
+          // drop that an earlier attempt already persisted.
+          ...(drop ? dropFields : { mediaId }),
           errorMessage: null,
         },
       });
@@ -727,7 +744,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
             automation.dmMessage,
             commenterName,
             automation.trackedLinks,
-            bodyText
+            bodyText,
+            automation.linkButtonLabel,
+            linkOverride
           );
           try {
             await sendPrivateReply({

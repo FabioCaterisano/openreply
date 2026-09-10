@@ -1477,6 +1477,33 @@ describe("CATNO drop resolution", () => {
     expect(buttons[1].title).toBe("Alle Drops 🔓");
   });
 
+  it("keeps the handout and k in the inline fallback when the button template is rejected", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([
+      {
+        ...mockAutomation,
+        matchAnyPost: true,
+        keywords: ["DROP"],
+        linkButtonLabel: "Drop aus dem Reel",
+        trackedLinks: [libraryLink],
+      },
+    ]);
+    mockSendPrivateReplyWithLinkButton.mockRejectedValue(
+      new Error("Unsupported message template")
+    );
+
+    const processor = getProcessor();
+    await processor(
+      createMockJob({ ...mockJobData, commentText: "DROP", mediaId: "media_1" })
+    );
+
+    expect(mockSendPrivateReply).toHaveBeenCalledTimes(1);
+    // meta.sendPrivateReply(token, igId, commentId, message)
+    const text = mockSendPrivateReply.mock.calls[0][3] as string;
+    expect(text).toContain("https://decks.catno.ai/gpt-weiss-alles/?src=dm");
+    expect(text).toMatch(/\/r\/lib123\?k=27(\s|$)/);
+    expect(text.indexOf("decks.catno.ai")).toBeLessThan(text.indexOf("/r/lib123"));
+  });
+
   it("uses the persisted drop when the follow-gate postback reveals the link", async () => {
     mockGetUserFollowStatus.mockResolvedValue(true);
     mockPrisma.automation.findFirst.mockResolvedValue({
