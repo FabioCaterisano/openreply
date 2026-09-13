@@ -1408,6 +1408,16 @@ describe("CATNO drop resolution", () => {
     label: "Primary campaign link",
     destinationUrl: "https://catno.ai/free?src=dm",
   };
+  const configuredHandout = {
+    slug: "old-handout",
+    label: "Primary campaign link",
+    destinationUrl: "https://decks.catno.ai/prompt-sammlung/",
+  };
+  const secondaryLibrary = {
+    slug: "guide123",
+    label: "Alle Drops 🔓",
+    destinationUrl: "https://catno.ai/guides",
+  };
 
   beforeEach(() => {
     mockGetMediaPermalink.mockResolvedValue(
@@ -1455,6 +1465,121 @@ describe("CATNO drop resolution", () => {
     });
     expect(buttons[1].title).toBe("Alle Drops 🔓");
     expect(buttons[1].url).toMatch(/\/r\/lib123\?k=27$/);
+  });
+
+  it.each([27, 31])("replaces the configured handout with resolved drop %i and keeps the guide", async (dropNumber) => {
+    const handoutUrl = `https://decks.catno.ai/drop-${dropNumber}/`;
+    mockResolveDrop.mockResolvedValue({ dropNumber, handoutUrl, slug: `drop-${dropNumber}`, matchedBy: "permalink" });
+    const trackedLinks = [configuredHandout, secondaryLibrary];
+    mockPrisma.automation.findMany.mockResolvedValue([{
+      ...mockAutomation,
+      linkButtonLabel: "Drop aus dem Reel",
+      trackedLinks,
+    }]);
+
+    await getProcessor()(createMockJob({ ...mockJobData, commentText: "DROPX" }));
+
+    expect(mockSendPrivateReplyWithLinkButton).toHaveBeenCalledTimes(1);
+    expect(mockSendPrivateReplyWithLinkButton.mock.calls[0][4]).toEqual([
+      { title: "Drop aus dem Reel", url: `${handoutUrl}?src=dm` },
+      { title: "Alle Drops 🔓", url: expect.stringMatching(new RegExp(`/r/guide123\\?k=${dropNumber}$`)) },
+    ]);
+    expect(trackedLinks).toEqual([configuredHandout, secondaryLibrary]);
+  });
+
+  it("omits the configured handout from the inline fallback as well", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{
+      ...mockAutomation,
+      dmMessage: "Here is your drop: {link}",
+      linkButtonLabel: "Drop aus dem Reel",
+      trackedLinks: [configuredHandout, secondaryLibrary],
+    }]);
+    mockSendPrivateReplyWithLinkButton.mockRejectedValue(new Error("Unsupported message template"));
+
+    await getProcessor()(createMockJob(mockJobData));
+
+    const text = mockSendPrivateReply.mock.calls[0][3] as string;
+    expect(text.match(/https?:\/\/\S+/g)).toHaveLength(2);
+    expect(text).toContain("Drop aus dem Reel: https://decks.catno.ai/gpt-weiss-alles/?src=dm");
+    expect(text).toMatch(/Alle Drops 🔓: \S*\/r\/guide123\?k=27/);
+    expect(text).not.toContain("old-handout");
+    expect(text).not.toContain("prompt-sammlung");
+  });
+
+  it.each([
+    "https://catno.ai/free?src=dm",
+    "https://catno.ai/guide/",
+    "https://decks.catno.ai/freestuff/",
+  ])("recognizes the existing library alias %s without relying on button titles", async (destinationUrl) => {
+    mockPrisma.automation.findMany.mockResolvedValue([{
+      ...mockAutomation,
+      linkButtonLabel: "Download",
+      trackedLinks: [configuredHandout, { ...secondaryLibrary, destinationUrl }],
+    }]);
+
+    await getProcessor()(createMockJob(mockJobData));
+
+    const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
+    expect(buttons).toHaveLength(2);
+    expect(buttons[1].title).toBe("Alle Drops 🔓");
+    expect(buttons[1].url).toMatch(/\/r\/guide123\?k=27$/);
+  });
+
+  it("keeps a primary library and its title when an extra link is configured", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{
+      ...mockAutomation,
+      linkButtonLabel: "Library",
+      trackedLinks: [libraryLink, { slug: "support", label: "Help", destinationUrl: "https://example.com/help" }],
+    }]);
+
+    await getProcessor()(createMockJob(mockJobData));
+
+    const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
+    expect(buttons).toHaveLength(3);
+    expect(buttons[1]).toEqual({ title: "Library", url: expect.stringMatching(/\/r\/lib123\?k=27$/) });
+    expect(buttons[2].title).toBe("Help");
+  });
+
+  it("preserves ordinary campaign buttons when no drop resolves", async () => {
+    mockResolveDrop.mockResolvedValue(null);
+    mockPrisma.automation.findMany.mockResolvedValue([{
+      ...mockAutomation,
+      linkButtonLabel: "Download",
+      trackedLinks: [configuredHandout, secondaryLibrary],
+    }]);
+
+    await getProcessor()(createMockJob(mockJobData));
+
+    expect(mockSendPrivateReplyWithLinkButton.mock.calls[0][4]).toEqual([
+      { title: "Download", url: expect.stringMatching(/\/r\/old-handout$/) },
+      { title: "Alle Drops 🔓", url: expect.stringMatching(/\/r\/guide123$/) },
+    ]);
+  });
+
+  it("replaces the configured handout after a follow-check too", async () => {
+    mockGetUserFollowStatus.mockResolvedValue(true);
+    mockPrisma.automation.findFirst.mockResolvedValue({
+      ...mockAutomation,
+      requireFollow: true,
+      linkButtonLabel: "Drop aus dem Reel",
+      trackedLinks: [configuredHandout, secondaryLibrary],
+    });
+    mockPrisma.dmLog.findFirst.mockResolvedValue({
+      commenterName: "tester",
+      dropUrl: "https://decks.catno.ai/gpt-weiss-alles/",
+      dropNumber: 27,
+    });
+
+    await getProcessor()(createMockPostbackJob({
+      instagramAccountId: "ig_456",
+      userId: "commenter_999",
+      payload: "followcheck:auto_789",
+    }));
+
+    expect(mockSendDirectMessageWithLinkButton.mock.calls[0][4]).toEqual([
+      { title: "Drop aus dem Reel", url: "https://decks.catno.ai/gpt-weiss-alles/?src=dm" },
+      { title: "Alle Drops 🔓", url: expect.stringMatching(/\/r\/guide123\?k=27$/) },
+    ]);
   });
 
   it("falls back to upstream's 'Open link' for the library button when no label exists", async () => {
