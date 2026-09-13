@@ -2,6 +2,7 @@ import { prisma } from '@/lib/db/client';
 import { getDMQueue, MESSAGE_JOB_NAME, POSTBACK_JOB_NAME } from '@/lib/queue/client';
 import { parseCommentEvents, parseMessageEvents, parsePostbackEvents, parseReadEvents } from '@/lib/meta/webhook';
 import { Prisma, type InstagramProvider } from '@/app/generated/prisma/client';
+import { encodePostback } from '@/lib/queue/postback-payload';
 
 const OPENING_DM_READ_FALLBACK_DELAY_MS = 5 * 60 * 1000;
 type InstagramPayload = Parameters<typeof parseCommentEvents>[0];
@@ -140,6 +141,10 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
         where: {
           commenterId: event.userId,
           status: "SENT",
+          instagramAccountId: accountMap.get(event.instagramAccountId)!.id,
+          dmDeliveryUnconfirmed: false,
+          postbackVersion: 1,
+          NOT: [{ commentId: { startsWith: "reveal:" } }, { commentId: { startsWith: "dm:" } }],
           automation: {
             isActive: true,
             openingDmEnabled: true,
@@ -149,6 +154,7 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
           },
         },
         select: {
+          id: true,
           automation: {
             select: {
               id: true,
@@ -157,11 +163,8 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
         },
       });
 
-      const scheduledAutomationIds = new Set<string>();
       for (const log of openingLogs) {
         const automation = log.automation;
-        if (scheduledAutomationIds.has(automation.id)) continue;
-        scheduledAutomationIds.add(automation.id);
 
         await queue.add(
           POSTBACK_JOB_NAME,
@@ -169,12 +172,12 @@ export async function processInstagramWebhook({ payload: incoming, provider, wor
             instagramAccountId: event.instagramAccountId,
           accountConnectionId: accountMap.get(event.instagramAccountId)?.id,
             userId: event.userId,
-            payload: `reveal:${automation.id}`,
+            payload: encodePostback("reveal", automation.id, log.id),
             fallback: true,
           },
           {
             delay: OPENING_DM_READ_FALLBACK_DELAY_MS,
-            jobId: `read_fallback_${event.instagramAccountId}_${event.userId}_${automation.id}`,
+            jobId: `read_fallback_${event.instagramAccountId}_${event.userId}_${log.id}`,
           }
         );
       }

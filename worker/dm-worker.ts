@@ -2,6 +2,7 @@ import { createDMWorker } from "@/lib/queue/dm-worker";
 import { recordWorkerHeartbeat } from "@/lib/ops/worker-health";
 import { reconcileComments } from "@/lib/polling/comment-reconciler";
 import os from "node:os";
+import { enqueuePendingDrops } from "@/lib/drops/pending";
 
 const worker = createDMWorker();
 const startedAt = new Date().toISOString();
@@ -43,10 +44,22 @@ async function poll() {
 setTimeout(() => void poll(), 10_000);
 const pollTimer = setInterval(() => void poll(), POLL_INTERVAL_MS);
 
+let pendingSweepRunning = false;
+async function sweepPendingDrops() {
+  if (pendingSweepRunning) return;
+  pendingSweepRunning = true;
+  try { await enqueuePendingDrops(); }
+  catch (error) { console.error("[DM Worker] Pending drop sweep failed", error instanceof Error ? error.message : "Unknown error"); }
+  finally { pendingSweepRunning = false; }
+}
+void sweepPendingDrops();
+const dropTimer = setInterval(() => void sweepPendingDrops(), 30_000);
+
 async function shutdown(signal: string) {
   console.log(`[DM Worker] ${signal} received, closing worker`);
   clearInterval(heartbeatTimer);
   clearInterval(pollTimer);
+  clearInterval(dropTimer);
   await worker.close();
   process.exit(0);
 }

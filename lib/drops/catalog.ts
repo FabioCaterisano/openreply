@@ -8,15 +8,18 @@ export type Drop = {
   title: string;
   handout_url: string;
   instagram_url: string | null;
+  instagram_urls?: string[];
   status: string;
 };
 
 type Catalog = { drops: Drop[] };
 
 let cache: { drops: Drop[]; fetchedAt: number } | null = null;
+let refreshing: Promise<Drop[]> | null = null;
 
 export function __resetDropsCache(): void {
   cache = null;
+  refreshing = null;
 }
 
 function cacheSeconds(): number {
@@ -24,20 +27,29 @@ function cacheSeconds(): number {
   return Number.isFinite(raw) && raw > 0 ? raw : 300;
 }
 
-export async function loadDrops(): Promise<Drop[]> {
+export async function loadDrops(options: { forceRefresh?: boolean; strict?: boolean } = {}): Promise<Drop[]> {
   const now = Date.now();
-  if (cache && now - cache.fetchedAt < cacheSeconds() * 1000) return cache.drops;
+  if (!options.forceRefresh && cache && now - cache.fetchedAt < cacheSeconds() * 1000) return cache.drops;
+  if (!refreshing) refreshing = fetchDrops().finally(() => { refreshing = null; });
+  try { return await refreshing; } catch (error) {
+    if (options.strict) throw error;
+    return cache?.drops ?? [];
+  }
+}
+
+async function fetchDrops(): Promise<Drop[]> {
   const url = process.env.DROPS_JSON_URL ?? "https://decks.catno.ai/freestuff/drops.json";
   try {
-    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15_000), headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error(`drops.json ${response.status}`);
     const data = (await response.json()) as Catalog;
-    const drops = Array.isArray(data.drops) ? data.drops : [];
-    cache = { drops, fetchedAt: now };
+    if (!Array.isArray(data.drops)) throw new Error("Invalid drops catalog");
+    const drops = data.drops;
+    cache = { drops, fetchedAt: Date.now() };
     return drops;
   } catch (error) {
     console.log("[drops] catalog fetch failed:", error instanceof Error ? error.message : error);
-    return cache?.drops ?? [];
+    throw error;
   }
 }
 
@@ -46,7 +58,11 @@ const SHORTCODE_RE = /instagram\.com\/(?:[^/?#]+\/)?(?:reel|reels|p)\/([A-Za-z0-
 
 /** Shortcode of a reel/post URL, or null when it is not a media URL. */
 export function instagramShortcode(url: string | null | undefined): string | null {
-  if (!url) return null;
+  if (typeof url !== "string") return null;
+  try {
+    const parsed = new URL(url);
+    if (!["instagram.com", "www.instagram.com"].includes(parsed.hostname) || parsed.protocol !== "https:") return null;
+  } catch { return null; }
   const match = SHORTCODE_RE.exec(url);
   return match ? match[1] : null;
 }

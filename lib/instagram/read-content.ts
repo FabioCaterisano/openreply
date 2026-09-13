@@ -10,6 +10,16 @@ type Comment = {
   replies?: Comment[];
 };
 
+export async function getMediaDetails({ context, mediaId }: { context: InstagramContext; mediaId: string }) {
+  if (context.provider !== "META") throw new Error("Media metadata is unavailable for this provider");
+  return meta.getMediaDetails(context.accessToken, mediaId);
+}
+
+export async function getUserMediaPage({ context, after, limit }: { context: InstagramContext; after?: string; limit?: number }) {
+  if (context.provider !== "META") throw new Error("Media pagination is unavailable for this provider");
+  return meta.getUserMediaPage(context.accessToken, after, limit);
+}
+
 export async function getRecentMediaComments({
   context,
   mediaId,

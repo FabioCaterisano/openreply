@@ -566,6 +566,28 @@ const MEDIA_FIELDS =
 // Instagram caps a single media page at 100 items.
 const MEDIA_PAGE_SIZE = 100;
 
+export async function getUserMediaPage(accessToken: string, after?: string, limit = 100): Promise<{ data: InstagramMedia[]; after: string | null }> {
+  const url = new URL(`${instagramGraphBase()}/me/media`);
+  url.searchParams.set("fields", "id,caption,permalink,timestamp,thumbnail_url,media_type,media_product_type");
+  url.searchParams.set("limit", String(Math.min(100, Math.max(1, limit))));
+  if (after) url.searchParams.set("after", after);
+  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15_000), headers: { Authorization: `Bearer ${accessToken}` } });
+  const page = await handleResponse<{ data: InstagramMedia[]; paging?: { next?: string; cursors?: { after?: string } } }>(response);
+  if (!Array.isArray(page.data)) throw new Error("Invalid media page");
+  const next = page.paging?.next ? page.paging.cursors?.after : null;
+  if (page.paging?.next && (!next || next === after)) throw new Error("Invalid media pagination");
+  return { data: page.data, after: next ?? null };
+}
+
+export async function getMediaDetails(accessToken: string, mediaId: string): Promise<Pick<InstagramMedia, "id" | "caption" | "permalink" | "timestamp">> {
+  const url = new URL(`${instagramGraphBase()}/${encodeURIComponent(mediaId)}`);
+  url.searchParams.set("fields", "id,caption,permalink,timestamp");
+  const response = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(15_000), headers: { Authorization: `Bearer ${accessToken}` } });
+  const media = await handleResponse<InstagramMedia>(response);
+  if (media.id !== mediaId || typeof media.permalink !== "string") throw new Error("Incomplete media metadata");
+  return media;
+}
+
 export async function getUserMedia(
   accessToken: string,
   limit = 25

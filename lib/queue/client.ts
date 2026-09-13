@@ -23,6 +23,8 @@ export function getRedisConnection(): Redis {
 export type CommentSource = "WEBHOOK" | "POLLING";
 
 export interface ProcessCommentJob {
+  automationId?: string;
+  pendingClaimToken?: string;
   accountConnectionId?: string;
   instagramAccountId: string;
   commentId: string;

@@ -237,6 +237,15 @@ model DmLog {
   dropNumber Int?
   dropSlug   String?
   dropUrl    String?
+  expectedDropNumber Int?
+  dropPending Boolean @default(false)
+  dropRetryAt DateTime?
+  dropRetryAttempts Int @default(0)
+  dropClaimToken String?
+  dropClaimUntil DateTime?
+  originalMediaId String?
+  // Null marks legacy buttons whose reveal history is keyed only by recipient.
+  postbackVersion Int?
   status        DmStatus @default(PENDING)
   attempts      Int      @default(0)
   dmSentAt      DateTime?
@@ -263,6 +272,7 @@ model DmLog {
   @@index([instagramAccountId])
   @@index([status])
   @@index([automationId, commenterId, createdAt])
+  @@index([dropPending, dropRetryAt])
 }
 
 // Legacy reconciliation model; currently unwired. Runtime code does not read

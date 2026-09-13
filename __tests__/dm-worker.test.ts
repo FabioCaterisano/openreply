@@ -17,6 +17,7 @@ const {
   mockReleaseWorkspaceDMReservation,
   mockResolveDrop,
   mockGetMediaPermalink,
+  mockGetMediaDetails,
 } = vi.hoisted(() => ({
   mockPrisma: {
     zernioConnection: { findUnique: vi.fn() },
@@ -26,6 +27,8 @@ const {
       findFirst: vi.fn(),
     },
     dmLog: {
+      findMany: vi.fn(),
+      updateMany: vi.fn(),
       findUnique: vi.fn(),
       findFirst: vi.fn(),
       upsert: vi.fn(),
@@ -54,6 +57,7 @@ const {
   mockReleaseWorkspaceDMReservation: vi.fn(),
   mockResolveDrop: vi.fn(),
   mockGetMediaPermalink: vi.fn(),
+  mockGetMediaDetails: vi.fn(),
 }));
 
 vi.mock("@/lib/db/client", () => ({
@@ -71,6 +75,7 @@ vi.mock("@/lib/meta/client", () => ({
   sendCommentReply: vi.fn(),
   // The provider barrel routes META contexts to this function (read-content.ts).
   getMediaPermalink: mockGetMediaPermalink,
+  getMediaDetails: mockGetMediaDetails,
   MetaApiError: class MetaApiError extends Error {
     code: number;
     constructor(
@@ -100,7 +105,8 @@ vi.mock("@/lib/utils/keyword-matcher", () => ({
   matchKeywords: mockMatchKeywords,
 }));
 
-vi.mock("@/lib/drops/resolve", () => ({
+vi.mock("@/lib/drops/resolve", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/drops/resolve")>(),
   resolveDrop: mockResolveDrop,
 }));
 
@@ -212,7 +218,7 @@ function createMockPostbackJob(
   data: Record<string, unknown> = {
     instagramAccountId: "ig_456",
     userId: "commenter_999",
-    payload: "reveal:auto_789",
+    payload: "reveal:v1:auto_789:origin_555",
   }
 ) {
   return {
@@ -231,17 +237,20 @@ beforeEach(() => {
   mockPrisma.automation.findMany.mockResolvedValue([mockAutomation]);
   mockPrisma.automation.findFirst.mockResolvedValue(null);
   mockPrisma.dmLog.findUnique.mockResolvedValue(null);
-  mockPrisma.dmLog.create.mockResolvedValue({});
+  mockPrisma.dmLog.create.mockImplementation(async ({ data }) => ({ id: "origin_555", ...data }));
+  mockPrisma.dmLog.updateMany.mockResolvedValue({ count: 1 });
+  mockPrisma.dmLog.findMany.mockResolvedValue([]);
+  mockGetMediaDetails.mockImplementation(async (_token, id) => ({ id, caption: "", permalink: "https://www.instagram.com/reel/DQx1AbC2dEf/" }));
   // Two different lookups share findFirst: the cross-campaign private-reply
   // check (keyed on status SENT) and the postback's name lookup. Only the
   // latter should resolve by default, or every comment would look like a
   // duplicate of an already-answered one.
   mockPrisma.dmLog.findFirst.mockImplementation(
-    async (args: { where?: { status?: string } } = {}) =>
-      args.where?.status === "SENT" ? null : { commenterName: "commenter_user" }
+    async (args: { where?: { status?: string; id?: string } } = {}) =>
+      args.where?.status === "SENT" && !args.where.id ? null : { id: "origin_555", commenterName: "commenter_user", postbackVersion: 1 }
   );
-  mockPrisma.dmLog.upsert.mockResolvedValue({});
-  mockPrisma.dmLog.update.mockResolvedValue({});
+  mockPrisma.dmLog.upsert.mockImplementation(async ({ create }) => ({ id: "origin_555", dropRetryAttempts: 0, ...create }));
+  mockPrisma.dmLog.update.mockImplementation(async ({ data }) => ({ id: "origin_555", ...data }));
   mockPrisma.instagramAccount.findUnique.mockResolvedValue({
     workspaceId: "workspace_123",
   });
@@ -624,7 +633,7 @@ describe("DM Worker — Full Pipeline", () => {
       "comment_555",
       "Follow me first commenter_user, then tap 👇",
       "I'm following ✅",
-      "followcheck:auto_789"
+      "followcheck:v1:auto_789:origin_555"
     );
     expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
     expect(mockSendPrivateReply).not.toHaveBeenCalled();
@@ -693,7 +702,7 @@ describe("DM Worker — Full Pipeline", () => {
       "comment_555",
       "Hey commenter_user, welcome!",
       "Get the link",
-      "followcheck:auto_789"
+      "followcheck:v1:auto_789:origin_555"
     );
     // Follow status is verified on the tap, not at comment time.
     expect(mockGetUserFollowStatus).not.toHaveBeenCalled();
@@ -712,7 +721,7 @@ describe("DM Worker — Full Pipeline", () => {
       createMockPostbackJob({
         instagramAccountId: "ig_456",
         userId: "commenter_999",
-        payload: "reveal:auto_789",
+        payload: "reveal:v1:auto_789:origin_555",
         fallback: true,
       })
     );
@@ -721,7 +730,7 @@ describe("DM Worker — Full Pipeline", () => {
       where: {
         automationId_commentId: {
           automationId: "auto_789",
-          commentId: "reveal:commenter_999",
+          commentId: "reveal:origin_555",
         },
       },
     });
@@ -749,7 +758,7 @@ describe("DM Worker — Full Pipeline", () => {
       createMockPostbackJob({
         instagramAccountId: "ig_456",
         userId: "commenter_999",
-        payload: "reveal:auto_789",
+        payload: "reveal:v1:auto_789:origin_555",
         fallback: true,
       })
     );
@@ -772,7 +781,7 @@ describe("DM Worker — Full Pipeline", () => {
       createMockPostbackJob({
         instagramAccountId: "ig_456",
         userId: "commenter_999",
-        payload: "reveal:auto_789",
+        payload: "reveal:v1:auto_789:origin_555",
         fallback: true,
       })
     );
@@ -797,7 +806,7 @@ describe("DM Worker — Full Pipeline", () => {
       createMockPostbackJob({
         instagramAccountId: "ig_456",
         userId: "commenter_999",
-        payload: "reveal:auto_789",
+        payload: "reveal:v1:auto_789:origin_555",
         fallback: true,
       })
     );
@@ -828,7 +837,7 @@ describe("DM Worker — Full Pipeline", () => {
         createMockPostbackJob({
           instagramAccountId: "ig_456",
           userId: "commenter_999",
-          payload: "reveal:auto_789",
+          payload: "reveal:v1:auto_789:origin_555",
           fallback: true,
         })
       )
@@ -852,7 +861,7 @@ describe("DM Worker — Full Pipeline", () => {
         createMockPostbackJob({
           instagramAccountId: "ig_456",
           userId: "commenter_999",
-          payload: "reveal:auto_789",
+          payload: "reveal:v1:auto_789:origin_555",
         })
       )
     ).rejects.toThrow("boom");
@@ -1082,7 +1091,7 @@ describe("DM Worker — DM keyword trigger", () => {
       "commenter_999",
       expect.any(String),
       "I'm following ✅",
-      "followcheck:auto_789"
+      "followcheck:v1:auto_789:origin_555"
     );
     expect(mockSendDirectMessage).not.toHaveBeenCalled();
   });
@@ -1284,7 +1293,7 @@ describe("durable Zernio postback delivery", () => {
     return createMockPostbackJob({
       instagramAccountId: "ig_456",
       userId: "commenter_999",
-      payload: "reveal:auto_789",
+      payload: "reveal:v1:auto_789:origin_555",
       mid,
     });
   }
@@ -1388,7 +1397,7 @@ describe("durable Zernio postback delivery", () => {
     try {
       const process = getProcessor();
       const followTap = tap("follow");
-      followTap.data = { ...followTap.data, payload: "followcheck:auto_789" };
+      followTap.data = { ...followTap.data, payload: "followcheck:v1:auto_789:origin_555" };
       await process(followTap);
       await process({ ...followTap, id: "redelivery" });
       expect(
@@ -1452,11 +1461,9 @@ describe("CATNO drop resolution", () => {
       permalink: "https://www.instagram.com/reel/DQx1AbC2dEf/",
       commentText: "DROP",
     });
-    const logCreate =
-      mockPrisma.dmLog.create.mock.calls.at(-1)?.[0] ??
-      mockPrisma.dmLog.upsert.mock.calls.at(-1)?.[0];
-    expect(JSON.stringify(logCreate)).toContain('"dropNumber":27');
-    expect(JSON.stringify(logCreate)).toContain('"mediaId":"media_1"');
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({ dropNumber: 27, mediaId: "media_1" }),
+    }));
 
     const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
     expect(buttons[0]).toEqual({
@@ -1565,6 +1572,7 @@ describe("CATNO drop resolution", () => {
       trackedLinks: [configuredHandout, secondaryLibrary],
     });
     mockPrisma.dmLog.findFirst.mockResolvedValue({
+      id: "origin_555",
       commenterName: "tester",
       dropUrl: "https://decks.catno.ai/gpt-weiss-alles/",
       dropNumber: 27,
@@ -1573,7 +1581,7 @@ describe("CATNO drop resolution", () => {
     await getProcessor()(createMockPostbackJob({
       instagramAccountId: "ig_456",
       userId: "commenter_999",
-      payload: "followcheck:auto_789",
+      payload: "followcheck:v1:auto_789:origin_555",
     }));
 
     expect(mockSendDirectMessageWithLinkButton.mock.calls[0][4]).toEqual([
@@ -1642,6 +1650,7 @@ describe("CATNO drop resolution", () => {
       trackedLinks: [libraryLink],
     });
     mockPrisma.dmLog.findFirst.mockResolvedValue({
+      id: "origin_555",
       commenterName: "tester",
       dropUrl: "https://decks.catno.ai/gpt-weiss-alles/",
       dropNumber: 27,
@@ -1652,7 +1661,7 @@ describe("CATNO drop resolution", () => {
       createMockPostbackJob({
         instagramAccountId: "ig_456",
         userId: "commenter_999",
-        payload: "followcheck:auto_789",
+        payload: "followcheck:v1:auto_789:origin_555",
       })
     );
 
@@ -1688,5 +1697,128 @@ describe("CATNO drop resolution", () => {
     expect(buttons).toHaveLength(1);
     expect(buttons[0].title).toBe("Alle Drops 🔓");
     expect(buttons[0].url).toMatch(/\/r\/lib123$/);
+  });
+});
+
+describe("release-safe drop delivery", () => {
+  const campaign = { ...mockAutomation, trackedLinks: [{ slug: "library", label: "Library", destinationUrl: "https://catno.ai/guides" }] };
+  beforeEach(() => {
+    mockPrisma.automation.findMany.mockResolvedValue([campaign]);
+    mockResolveDrop.mockReset().mockResolvedValue(null);
+    mockGetMediaDetails.mockResolvedValue({ id: "media_101", caption: "#catnodrop27", permalink: "https://www.instagram.com/reel/NEW27/" });
+  });
+
+  it("keeps a tagged missing alias pending without a send or quota reservation", async () => {
+    await getProcessor()(createMockJob(mockJobData));
+    expect(mockResolveDrop).toHaveBeenCalledWith(expect.objectContaining({ expectedDropNumber: 27, strict: true }));
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({ data: { expectedDropNumber: 27 } }));
+    expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
+    expect(mockSendPrivateReplyWithButton).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "PENDING", errorMessage: expect.stringContaining("awaiting") }) }));
+  });
+
+  it("keeps unavailable metadata pending instead of treating it as an untagged reel", async () => {
+    mockGetMediaDetails.mockRejectedValue(new Error("provider unavailable"));
+    await getProcessor()(createMockJob(mockJobData));
+    expect(mockResolveDrop).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ errorMessage: expect.stringContaining("provider unavailable") }) }));
+  });
+
+  it("rejects ambiguous own tags while ignoring a sister-post URL", async () => {
+    mockGetMediaDetails.mockResolvedValue({ id: "media_101", caption: "#catnodrop27 #catnodrop31 https://instagram.com/reel/SISTER/", permalink: "https://www.instagram.com/reel/NEW27/" });
+    await getProcessor()(createMockJob(mockJobData));
+    expect(mockResolveDrop).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+  });
+
+  it("uses the already bound drop before any provider or catalog lookup", async () => {
+    const persisted = { id: "origin_555", status: "FAILED", dropRetryAttempts: 2, mediaId: "media_101", dropNumber: 27, dropSlug: "old", dropUrl: "https://decks.catno.ai/old/" };
+    mockPrisma.dmLog.findUnique.mockResolvedValue(persisted);
+    mockPrisma.dmLog.upsert.mockResolvedValue(persisted);
+    mockGetMediaDetails.mockRejectedValue(new Error("down"));
+    await getProcessor()(createMockJob(mockJobData));
+    expect(mockGetMediaDetails).not.toHaveBeenCalled();
+    expect(mockResolveDrop).not.toHaveBeenCalled();
+    expect(mockSendPrivateReplyWithLinkButton.mock.calls[0][4][0].url).toBe("https://decks.catno.ai/old/?src=dm");
+  });
+
+  it.each([{ status: "SENT" }, { status: "FAILED", dmDeliveryUnconfirmed: true }])("does not resend terminal delivery %j", async (state) => {
+    mockPrisma.dmLog.findUnique.mockResolvedValue({ ...state, dropPending: true });
+    await getProcessor()(createMockJob(mockJobData));
+    expect(mockGetMediaDetails).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+  });
+
+  it("respects an atomic claim held by another attempt", async () => {
+    mockPrisma.dmLog.updateMany.mockResolvedValue({ count: 0 });
+    await getProcessor()(createMockJob(mockJobData));
+    expect(mockGetMediaDetails).not.toHaveBeenCalled();
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+  });
+
+  it("uses the explicit origin even when the viewer has a newer reel", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue(campaign);
+    mockPrisma.dmLog.findFirst.mockImplementation(async ({ where }) => where.id === "origin_old"
+      ? { id: "origin_old", dropNumber: 27, dropUrl: "https://decks.catno.ai/old/", commenterName: "viewer" }
+      : { id: "origin_new", dropNumber: 31, dropUrl: "https://decks.catno.ai/new/" });
+    await getProcessor()(createMockPostbackJob({ instagramAccountId: "ig_456", userId: "commenter_999", payload: "reveal:v1:auto_789:origin_old" }));
+    expect(mockPrisma.dmLog.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ id: "origin_old", commenterId: "commenter_999", instagramAccountId: "ig_account_row_1", workspaceId: "workspace_123" }) }));
+    expect(mockSendDirectMessageWithLinkButton.mock.calls[0][4][0].url).toBe("https://decks.catno.ai/old/?src=dm");
+  });
+
+  it("rejects a forged origin that is not owned by this recipient and account", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue(campaign);
+    mockPrisma.dmLog.findFirst.mockResolvedValue(null);
+    await getProcessor()(createMockPostbackJob());
+    expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+  });
+
+  it("accepts a legacy button only for exactly one original", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue(campaign);
+    mockPrisma.dmLog.findMany.mockResolvedValue([{ id: "one" }, { id: "two" }]);
+    const job = createMockPostbackJob({ instagramAccountId: "ig_456", userId: "commenter_999", payload: "reveal:auto_789" });
+    await getProcessor()(job);
+    expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+    mockPrisma.dmLog.findMany.mockResolvedValue([{ id: "one", dropNumber: 27, dropUrl: "https://decks.catno.ai/old/" }]);
+    await getProcessor()(job);
+    expect(mockSendDirectMessageWithLinkButton).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["reveal:auto_789", "reveal:v1:auto_789:origin_old"])("does not replay a historical delivery through read fallback %s", async payload => {
+    mockPrisma.automation.findFirst.mockResolvedValue(campaign);
+    const legacyOrigin = { id: "origin_old", postbackVersion: null, dropNumber: 27, dropUrl: "https://decks.catno.ai/old/" };
+    mockPrisma.dmLog.findFirst.mockResolvedValue(legacyOrigin);
+    mockPrisma.dmLog.findMany.mockResolvedValue([legacyOrigin]);
+    // Before migration, successful reveals used the recipient as their key.
+    mockPrisma.dmLog.findUnique.mockImplementation(async ({ where }) =>
+      where.automationId_commentId.commentId === "reveal:commenter_999" ? { status: "SENT" } : null);
+    await getProcessor()(createMockPostbackJob({ instagramAccountId: "ig_456", userId: "commenter_999", payload, fallback: true }));
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+    expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+  });
+
+  it("marks a newly delivered opening button as eligible for per-origin read fallback", async () => {
+    mockPrisma.automation.findMany.mockResolvedValue([{ ...campaign, openingDmEnabled: true, openingDmMessage: "Tap for your drop", openingDmButtonLabel: "Show drop" }]);
+    mockResolveDrop.mockResolvedValue({ dropNumber: 27, slug: "old", handoutUrl: "https://decks.catno.ai/old/", matchedBy: "permalink" });
+    await getProcessor()(createMockJob(mockJobData));
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalled();
+    expect(mockPrisma.dmLog.update).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ status: "SENT", postbackVersion: 1 }) }));
+  });
+
+  it("does not retarget an old queued originless fallback to a new v1 original", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue(campaign);
+    mockPrisma.dmLog.findMany.mockResolvedValue([{ id: "new-origin", postbackVersion: 1 }]);
+    await getProcessor()(createMockPostbackJob({ instagramAccountId: "ig_456", userId: "commenter_999", payload: "reveal:auto_789", fallback: true }));
+    expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+    expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+  });
+
+  it("preserves origin on a repeated follow prompt", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue({ ...campaign, requireFollow: true });
+    mockGetUserFollowStatus.mockResolvedValue(false);
+    await getProcessor()(createMockPostbackJob({ instagramAccountId: "ig_456", userId: "commenter_999", payload: "followcheck:v1:auto_789:origin_555" }));
+    expect(mockSendDirectMessageWithButton.mock.calls[0][5]).toBe("followcheck:v1:auto_789:origin_555");
   });
 });

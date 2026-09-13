@@ -4,7 +4,7 @@ import {
   parseDropNumber,
   __resetDropsCache,
 } from "@/lib/drops/catalog";
-import { resolveDrop } from "@/lib/drops/resolve";
+import { resolveDrop, taggedDropNumber } from "@/lib/drops/resolve";
 
 const CATALOG = {
   premium_enabled: false,
@@ -121,4 +121,41 @@ describe("resolveDrop", () => {
     vi.stubGlobal("fetch", vi.fn(async () => { throw new Error("down"); }));
     expect(await resolveDrop({ permalink: null, commentText: "DROP 12" })).toBeNull();
   });
+
+  it("matches every repost alias and rejects conflicts across drops", async () => {
+    const alias = "https://instagram.com/reel/REPOST27/";
+    vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => ({ drops: [{ ...CATALOG.drops[0], instagram_url: null, instagram_urls: [alias] }] }) } as Response);
+    expect((await resolveDrop({ permalink: alias, commentText: "", expectedDropNumber: 27 }))?.dropNumber).toBe(27);
+    vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => ({ drops: [{ ...CATALOG.drops[0], instagram_urls: [alias] }, { ...CATALOG.drops[1], instagram_urls: [alias] }] }) } as Response);
+    expect(await resolveDrop({ permalink: alias, commentText: "DROP 27", forceRefresh: true })).toBeNull();
+  });
+
+  it("refreshes a cache miss immediately and coalesces concurrent refreshes", async () => {
+    await resolveDrop({ permalink: null, commentText: "DROP 12" });
+    const alias = "https://instagram.com/reel/NEW27/";
+    vi.mocked(fetch).mockResolvedValue({ ok: true, json: async () => ({ drops: [{ ...CATALOG.drops[0], instagram_urls: [alias] }] }) } as Response);
+    const hits = await Promise.all([1, 2, 3].map(() => resolveDrop({ permalink: alias, commentText: "", expectedDropNumber: 27 })));
+    expect(hits.every(hit => hit?.dropNumber === 27)).toBe(true);
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenLastCalledWith(expect.any(String), expect.objectContaining({ cache: "no-store" }));
+  });
+
+  it("requires the permalink and expected number together", async () => {
+    expect(await resolveDrop({ permalink: "https://instagram.com/reel/UNBOUND/", commentText: "DROP 27", expectedDropNumber: 27 })).toBeNull();
+    expect(await resolveDrop({ permalink: CATALOG.drops[0].instagram_url, commentText: "DROP 12", expectedDropNumber: 12 })).toBeNull();
+  });
+
+  it("strict readback does not report stale readiness after a failed refresh", async () => {
+    await resolveDrop({ permalink: null, commentText: "DROP 12" });
+    vi.mocked(fetch).mockRejectedValue(new Error("offline"));
+    await expect(resolveDrop({ permalink: null, commentText: "DROP 12", forceRefresh: true, strict: true })).rejects.toThrow("offline");
+    expect((await resolveDrop({ permalink: null, commentText: "DROP 12" }))?.dropNumber).toBe(12);
+  });
+});
+
+it("parses only complete own machine tags", () => {
+  expect(taggedDropNumber("#catnodrop27 https://instagram.com/reel/SISTER/")).toEqual({ tagged: true, number: 27 });
+  expect(taggedDropNumber("#catnodrop27 #catnodrop31")).toEqual({ tagged: true, number: null });
+  expect(taggedDropNumber("#catnodrop27suffix #CATNODROP27")).toEqual({ tagged: false, number: null });
+  expect(instagramShortcode("https://evilinstagram.com/reel/EVIL/")).toBeNull();
 });

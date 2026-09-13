@@ -31,9 +31,11 @@ import {
   hasInstagramCredentials,
   type InstagramContext,
 } from "@/lib/instagram/provider";
-import { resolveDrop } from "@/lib/drops/resolve";
+import { resolveDrop, taggedDropNumber } from "@/lib/drops/resolve";
+import { claimDropComment } from "@/lib/drops/pending";
+import { encodePostback, parsePostback } from "@/lib/queue/postback-payload";
 import { emitEvent } from "@/lib/events/emit";
-import { getMediaPermalink } from "@/lib/instagram/provider";
+import { getMediaPermalink, getMediaDetails } from "@/lib/instagram/provider";
 import { matchKeywords } from "@/lib/utils/keyword-matcher";
 import { reserveDMSlot } from "@/lib/utils/rate-limiter";
 import {
@@ -297,6 +299,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
   const automations = await prisma.automation.findMany({
     where: {
       ...connectionScope(job.data),
+      ...(job.data.automationId ? { id: job.data.automationId } : {}),
       // Match campaigns bound to this specific post, plus any-post campaigns.
       // A comment left on an ad carries the ad's own media id, while the
       // campaign is bound to the post the ad was created from, so both ids
@@ -340,7 +343,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       continue;
     }
 
-    const existingLog = await prisma.dmLog.findUnique({
+    let existingLog = await prisma.dmLog.findUnique({
       where: {
         automationId_commentId: {
           automationId: automation.id,
@@ -364,6 +367,19 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       continue;
     }
 
+    const configuredDropIds = (process.env.CATNO_DROP_AUTOMATION_IDS ?? "").split(",").map(id => id.trim()).filter(Boolean);
+    const dropCampaign = configuredDropIds.length > 0 ? configuredDropIds.includes(automation.id) : automation.trackedLinks.some(isDropLibraryLink);
+    const dropClaim = needsDm && (dropCampaign || existingLog?.dropPending)
+      ? await claimDropComment({
+          workspaceId: automation.workspaceId, automationId: automation.id, instagramAccountId: automation.instagramAccountId,
+          commenterId, commenterName, commentText, commentId, mediaId, originalMediaId,
+          matchedKeyword: matchResult.matchedKeyword, status: "PENDING",
+        }, job.data.pendingClaimToken)
+      : null;
+    if (needsDm && (dropCampaign || existingLog?.dropPending) && !dropClaim) continue;
+    if (dropClaim) existingLog = dropClaim.log;
+    let originLog = existingLog;
+    try {
     if (!hasInstagramCredentials(automation.instagramAccount)) {
       await prisma.dmLog.upsert({
         where: {
@@ -426,17 +442,30 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       continue;
     }
 
-    // CATNO: which handout belongs to the reel this comment sits under?
-    // Permalink match first, number after DROP second, null = library only.
-    // Resolved before the log row is written so the follow-gate postback can
-    // read it back later. Never lets a lookup failure block the DM itself.
-    let drop: Awaited<ReturnType<typeof resolveDrop>> = null;
-    if (needsDm) {
+    // A previously bound drop is authoritative across retries and catalog outages.
+    let drop: Awaited<ReturnType<typeof resolveDrop>> = existingLog?.dropUrl && existingLog.dropNumber != null && existingLog.dropSlug
+      ? { handoutUrl: existingLog.dropUrl, dropNumber: existingLog.dropNumber, slug: existingLog.dropSlug, matchedBy: "permalink" }
+      : null;
+    if (needsDm && !drop) {
       try {
-        const permalink = await getMediaPermalink({ context: accessToken, mediaId });
-        drop = await resolveDrop({ permalink, commentText });
+        if (dropClaim) {
+          const media = await getMediaDetails({ context: accessToken, mediaId: originalMediaId ?? mediaId });
+          const tag = taggedDropNumber(media.caption ?? "");
+          const expected = existingLog?.expectedDropNumber ?? tag.number;
+          if (expected != null) await prisma.dmLog.update({ where: { id: existingLog!.id }, data: { expectedDropNumber: expected } });
+          if (tag.tagged && (tag.number == null || (expected != null && expected !== tag.number))) throw new Error("Ambiguous drop tag");
+          drop = await resolveDrop({ permalink: media.permalink ?? null, commentText, ...(expected != null ? { expectedDropNumber: expected, strict: true } : {}) });
+          if ((tag.tagged || expected != null) && !drop) throw new Error("Tagged reel is awaiting its catalog permalink binding");
+        } else {
+          const permalink = await getMediaPermalink({ context: accessToken, mediaId });
+          drop = await resolveDrop({ permalink, commentText });
+        }
       } catch (error) {
-        console.log("[DM Worker] Drop resolution failed, library only:", formatError(error));
+        if (dropClaim) {
+          await prisma.dmLog.update({ where: { id: existingLog!.id }, data: { status: "PENDING", errorMessage: `Drop pending: ${formatError(error)}` } });
+          continue;
+        }
+        console.log("[DM Worker] Drop resolution failed:", formatError(error));
       }
     }
     const dropFields = {
@@ -454,7 +483,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
     // Only (re)set PENDING when the DM will actually be attempted, so a prior
     // SENT is never clobbered while we come back just to retry the public reply.
     if (!existingLog) {
-      await prisma.dmLog.create({
+      originLog = await prisma.dmLog.create({
         data: {
           workspaceId: automation.workspaceId,
           automationId: automation.id,
@@ -470,7 +499,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         },
       });
     } else if (needsDm) {
-      await prisma.dmLog.update({
+      originLog = await prisma.dmLog.update({
         where: {
           automationId_commentId: { automationId: automation.id, commentId },
         },
@@ -486,6 +515,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       });
     }
 
+    await dropClaim?.assertOwned();
     // Public reply leg — decoupled from the DM and posted first so a DM failure
     // (e.g. a non-follower whose messaging is restricted) never suppresses it.
     // Idempotent across retries via publicReplySentAt.
@@ -707,8 +737,8 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           text: openingText,
           buttonTitle: automation.openingDmButtonLabel as string,
           payload: automation.requireFollow
-            ? `followcheck:${automation.id}`
-            : `reveal:${automation.id}`,
+            ? encodePostback("followcheck", automation.id, originLog!.id)
+            : encodePostback("reveal", automation.id, originLog!.id),
           postId: mediaId,
         });
       } else if (sendFollowPrompt) {
@@ -724,7 +754,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           commentId: commentId,
           text: promptText,
           buttonTitle: automation.followPromptButtonLabel || "i'm following",
-          payload: `followcheck:${automation.id}`,
+          payload: encodePostback("followcheck", automation.id, originLog!.id),
           postId: mediaId,
         });
         void emitEvent("follow_prompt.sent", {
@@ -812,6 +842,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         data: {
           status: "SENT",
           dmSentAt: new Date(),
+          postbackVersion: useOpeningDm || sendFollowPrompt ? 1 : null,
           errorMessage: null,
         },
       });
@@ -845,6 +876,9 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
         },
       });
       throw error;
+    }
+    } finally {
+      await dropClaim?.finish();
     }
   }
 }
@@ -900,11 +934,10 @@ async function sendPostbackOnce({
 async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
   const { instagramAccountId, userId, payload, fallback } = job.data;
 
-  const isFollowCheck = payload.startsWith("followcheck:");
-  if (!isFollowCheck && !payload.startsWith("reveal:")) return;
-  const automationId = payload.slice(
-    isFollowCheck ? "followcheck:".length : "reveal:".length,
-  );
+  const target = parsePostback(payload);
+  if (!target) return;
+  const isFollowCheck = target.kind === "followcheck";
+  const { automationId } = target;
 
   const automation = await prisma.automation.findFirst({
     where: { id: automationId, isActive: true, ...connectionScope(job.data) },
@@ -926,11 +959,25 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
     return;
   }
 
-  // Duplicate sends are enabled: every button tap re-sends the reveal
-  // instead of only firing once per person.
-  const dedupeId = `reveal:${userId}`;
+  const originWhere = {
+    automationId: automation.id, commenterId: userId,
+    instagramAccountId: automation.instagramAccountId, workspaceId: automation.workspaceId,
+    status: "SENT" as const, dmDeliveryUnconfirmed: false,
+    NOT: [{ commentId: { startsWith: "reveal:" } }],
+  };
+  const openingLog = target.originId
+    ? await prisma.dmLog.findFirst({ where: { ...originWhere, id: target.originId } })
+    : await prisma.dmLog.findMany({ where: originWhere, take: 2 }).then(logs => logs.length === 1 ? logs[0] : null);
+  // Legacy buttons cannot distinguish multiple originals. Never guess latest.
+  if (!openingLog) return;
+  const originId = openingLog.id;
+  const dedupeId = `reveal:${originId}`;
 
   if (fallback) {
+    // Pre-migration reveals used reveal:<recipient>, so no per-origin receipt
+    // proves they are undelivered. Only newly emitted v1 buttons get fallbacks.
+    // Explicit legacy taps remain supported by the unique-origin lookup above.
+    if (!target.originId || openingLog.postbackVersion !== 1) return;
     const existingReveal = await prisma.dmLog.findUnique({
       where: {
         automationId_commentId: {
@@ -946,18 +993,6 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
       return;
   }
 
-  // Personalize {username} and pick up the CATNO drop resolved at comment time.
-  // Latest row for this user, excluding this path's own reveal row: it is newer
-  // than the comment on a repeat tap and carries no drop.
-  const openingLog = await prisma.dmLog.findFirst({
-    where: {
-      automationId: automation.id,
-      commenterId: userId,
-      commentId: { not: dedupeId },
-    },
-    orderBy: { createdAt: "desc" },
-    select: { commenterName: true, dropUrl: true, dropNumber: true },
-  });
   const commenterName = openingLog?.commenterName ?? null;
   const linkOverride: LinkButtonOverride = {
     primaryUrl: openingLog?.dropUrl ?? null,
@@ -1021,7 +1056,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
               text: promptText,
               buttonTitle:
                 automation.followPromptButtonLabel || "i'm following",
-              payload: `followcheck:${automation.id}`,
+              payload: encodePostback("followcheck", automation.id, originId),
             }),
         });
       } catch (error) {
@@ -1355,6 +1390,12 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
     });
     const commenterName = priorLog?.commenterName ?? null;
 
+    // Persist this inbound message before emitting a follow-check button.
+    const messageOrigin = await prisma.dmLog.upsert({
+      where: { automationId_commentId: { automationId: automation.id, commentId: dedupeId } },
+      create: { ...logBase, commenterName, status: "PENDING" }, update: {},
+    });
+
     // Follow gate: anyone not confirmed as a follower gets the prompt instead of
     // the link, with the same `followcheck:` button that re-verifies on tap.
     // `null` (unverifiable) prompts too — this is first contact, exactly like a
@@ -1410,7 +1451,7 @@ async function processMessage(job: Job<ProcessMessageJob>): Promise<void> {
           userId: senderId,
           text: promptText,
           buttonTitle: automation.followPromptButtonLabel || "I'm following ✅",
-          payload: `followcheck:${automation.id}`,
+          payload: encodePostback("followcheck", automation.id, messageOrigin.id),
         });
       } else {
         await sendRevealDirectMessage({
