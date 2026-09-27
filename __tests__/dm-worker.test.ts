@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const {
   mockPrisma,
@@ -1673,6 +1673,79 @@ describe("CATNO drop resolution", () => {
     });
     expect(buttons[1].title).toBe("Alle Drops 🔓");
     expect(buttons[1].url).toMatch(/\/r\/lib123\?k=27$/);
+  });
+
+  describe("reel-specific campaign without a library link", () => {
+    const promptLink = {
+      slug: "prompt100",
+      label: "Primary campaign link",
+      destinationUrl: "https://decks.catno.ai/100-gpt-codes/",
+    };
+    const reelCampaign = {
+      ...mockAutomation,
+      linkButtonLabel: "Zum Prompt",
+      trackedLinks: [promptLink],
+    };
+
+    afterEach(() => {
+      delete process.env.CATNO_DROP_AUTOMATION_IDS;
+    });
+
+    it("sends only its own button although a drop resolves", async () => {
+      mockPrisma.automation.findMany.mockResolvedValue([reelCampaign]);
+
+      await getProcessor()(createMockJob(mockJobData));
+
+      expect(mockSendPrivateReplyWithLinkButton.mock.calls[0][4]).toEqual([
+        { title: "Zum Prompt", url: expect.stringMatching(/\/r\/prompt100\?k=27$/) },
+      ]);
+    });
+
+    it("sends only its own button after a follow-check", async () => {
+      mockGetUserFollowStatus.mockResolvedValue(true);
+      mockPrisma.automation.findFirst.mockResolvedValue({ ...reelCampaign, requireFollow: true });
+      mockPrisma.dmLog.findFirst.mockResolvedValue({
+        id: "origin_555",
+        commenterName: "tester",
+        dropUrl: "https://decks.catno.ai/100-gpt-codes/",
+        dropNumber: 27,
+      });
+
+      await getProcessor()(createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "followcheck:v1:auto_789:origin_555",
+      }));
+
+      expect(mockSendDirectMessageWithLinkButton.mock.calls[0][4]).toEqual([
+        { title: "Zum Prompt", url: expect.stringMatching(/\/r\/prompt100\?k=27$/) },
+      ]);
+    });
+
+    it("keeps its link alone in the inline fallback", async () => {
+      mockPrisma.automation.findMany.mockResolvedValue([
+        { ...reelCampaign, dmMessage: "Hier ist dein Prompt: {link}" },
+      ]);
+      mockSendPrivateReplyWithLinkButton.mockRejectedValue(new Error("Unsupported message template"));
+
+      await getProcessor()(createMockJob(mockJobData));
+
+      const text = mockSendPrivateReply.mock.calls[0][3] as string;
+      expect(text.match(/https?:\/\/\S+/g)).toHaveLength(1);
+      expect(text).not.toContain("Drop aus dem Reel");
+    });
+
+    it("still gets the handout when it is listed as a configured drop campaign", async () => {
+      process.env.CATNO_DROP_AUTOMATION_IDS = "auto_789";
+      mockPrisma.automation.findMany.mockResolvedValue([
+        { ...reelCampaign, trackedLinks: [libraryLink], linkButtonLabel: "Alle Drops 🔓" },
+      ]);
+
+      await getProcessor()(createMockJob(mockJobData));
+
+      const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
+      expect(buttons[0]).toEqual({ title: "Drop aus dem Reel", url: "https://decks.catno.ai/gpt-weiss-alles/?src=dm" });
+    });
   });
 
   it("sends only the library button when nothing resolves", async () => {
