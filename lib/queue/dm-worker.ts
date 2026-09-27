@@ -128,6 +128,15 @@ function isDropLibraryLink(link: WorkerTrackedLink): boolean {
   }
 }
 
+// CATNO: only the drop campaign gets the resolved handout button. Any other
+// campaign (e.g. one set up for a single reel) sends exactly its own links.
+function isDropCampaign(automation: { id: string; trackedLinks: WorkerTrackedLink[] }): boolean {
+  const configuredDropIds = (process.env.CATNO_DROP_AUTOMATION_IDS ?? "").split(",").map(id => id.trim()).filter(Boolean);
+  return configuredDropIds.length > 0
+    ? configuredDropIds.includes(automation.id)
+    : automation.trackedLinks.some(isDropLibraryLink);
+}
+
 /**
  * Build the tappable link buttons for a DM. The first tracked link uses the
  * campaign's `linkButtonLabel` and each additional link its own stored `label`
@@ -367,8 +376,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       continue;
     }
 
-    const configuredDropIds = (process.env.CATNO_DROP_AUTOMATION_IDS ?? "").split(",").map(id => id.trim()).filter(Boolean);
-    const dropCampaign = configuredDropIds.length > 0 ? configuredDropIds.includes(automation.id) : automation.trackedLinks.some(isDropLibraryLink);
+    const dropCampaign = isDropCampaign(automation);
     const dropClaim = needsDm && (dropCampaign || existingLog?.dropPending)
       ? await claimDropComment({
           workspaceId: automation.workspaceId, automationId: automation.id, instagramAccountId: automation.instagramAccountId,
@@ -475,7 +483,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       dropUrl: drop?.handoutUrl ?? null,
     };
     const linkOverride: LinkButtonOverride = {
-      primaryUrl: drop?.handoutUrl ?? null,
+      primaryUrl: dropCampaign ? drop?.handoutUrl ?? null : null,
       query: drop ? { k: String(drop.dropNumber) } : {},
     };
 
@@ -995,7 +1003,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
 
   const commenterName = openingLog?.commenterName ?? null;
   const linkOverride: LinkButtonOverride = {
-    primaryUrl: openingLog?.dropUrl ?? null,
+    primaryUrl: isDropCampaign(automation) ? openingLog?.dropUrl ?? null : null,
     query:
       openingLog?.dropNumber != null
         ? { k: String(openingLog.dropNumber) }
