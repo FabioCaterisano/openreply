@@ -1735,6 +1735,19 @@ describe("CATNO drop resolution", () => {
       expect(text).not.toContain("Drop aus dem Reel");
     });
 
+    it("adds its own link to the inline fallback when the text has no {link}", async () => {
+      mockPrisma.automation.findMany.mockResolvedValue([
+        { ...reelCampaign, dmMessage: "Hier ist dein Prompt" },
+      ]);
+      mockSendPrivateReplyWithLinkButton.mockRejectedValue(new Error("Unsupported message template"));
+
+      await getProcessor()(createMockJob(mockJobData));
+
+      const text = mockSendPrivateReply.mock.calls[0][3] as string;
+      expect(text).toMatch(/\/r\/prompt100(\?|\s|$)/);
+      expect(text.match(/https?:\/\/\S+/g)).toHaveLength(1);
+    });
+
     it("still gets the handout when it is listed as a configured drop campaign", async () => {
       process.env.CATNO_DROP_AUTOMATION_IDS = "auto_789";
       mockPrisma.automation.findMany.mockResolvedValue([
@@ -1835,6 +1848,15 @@ describe("release-safe drop delivery", () => {
       await expect(getProcessor()(createMockJob(mockJobData))).rejects.toThrow();
       expect(retryScheduled()).toBe(false);
       expect(mockPrisma.dmLog.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ dropPending: false, dropRetryAt: null }) }));
+    });
+
+    it("never claims or sends again after a stored permanent rejection", async () => {
+      mockPrisma.dmLog.findUnique.mockResolvedValue({ ...persisted, dropPending: true, errorMessage: "PermissionError 100: The requested user cannot be found. (/v25.0/123/messages) [code=100 sub=2534014 type=IGApiException trace=-]" });
+      await getProcessor()(createMockJob(mockJobData));
+      expect(mockPrisma.dmLog.upsert).not.toHaveBeenCalled();
+      expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+      expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
+      expect(mockPrisma.dmLog.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ dropPending: false }) }));
     });
 
     it("keeps retrying a transient send failure", async () => {

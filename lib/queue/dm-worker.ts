@@ -89,7 +89,9 @@ const PERMANENT_PRIVATE_REPLY_SUBCODES = new Set([2534024, 2534014, 2534025]);
 
 function isPermanentPrivateReplyRejection(error: unknown): boolean {
   if (error instanceof MetaApiError && error.subcode != null && PERMANENT_PRIVATE_REPLY_SUBCODES.has(error.subcode)) return true;
-  const subcode = (error instanceof Error ? error.message : "").match(/\bsub=(\d+)\b/)?.[1];
+  // Also accepts a stored DmLog.errorMessage, which keeps the "sub=" marker.
+  const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+  const subcode = message.match(/\bsub=(\d+)\b/)?.[1];
   return subcode != null && PERMANENT_PRIVATE_REPLY_SUBCODES.has(Number(subcode));
 }
 
@@ -203,10 +205,14 @@ function buildInlineLinkFallback(
   const base =
     renderMessageWithTracking({ message, commenterName, trackedLinks }) ||
     bodyText;
-  const extraUrls = trackedLinks
-    .slice(1)
-    .map((link) => withQuery(buildTrackedUrl(link.slug), override?.query));
-  return extraUrls.length > 0 ? `${base}\n${extraUrls.join("\n")}` : base;
+  // CATNO: a text without {link} or the destination URL would otherwise lose
+  // the campaign's own link once the button template is rejected.
+  const primaryUrl = trackedLinks[0] ? buildTrackedUrl(trackedLinks[0].slug) : null;
+  const urls = [
+    ...(primaryUrl && !base.includes(primaryUrl) ? [withQuery(primaryUrl, override?.query)] : []),
+    ...trackedLinks.slice(1).map((link) => withQuery(buildTrackedUrl(link.slug), override?.query)),
+  ];
+  return urls.length > 0 ? `${base}\n${urls.join("\n")}` : base;
 }
 
 type RevealAutomation = {
@@ -375,7 +381,13 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
     const alreadyDmd = existingLog?.status === "SENT";
     const alreadyPublicReplied = Boolean(existingLog?.publicReplySentAt);
-    const needsDm = !alreadyDmd && !existingLog?.dmDeliveryUnconfirmed;
+    // CATNO: a stored permanent Meta rejection is final, so no webhook, poll,
+    // queue retry or drop sweep may claim or send this DM again.
+    const permanentlyRejected = existingLog?.status === "FAILED" && isPermanentPrivateReplyRejection(existingLog.errorMessage);
+    if (permanentlyRejected && existingLog?.dropPending) {
+      await prisma.dmLog.updateMany({ where: { id: existingLog.id, dropPending: true }, data: { dropPending: false, dropClaimToken: null, dropClaimUntil: null, dropRetryAt: null } });
+    }
+    const needsDm = !alreadyDmd && !existingLog?.dmDeliveryUnconfirmed && !permanentlyRejected;
 
     // Skip only when there is genuinely nothing left to do. A comment whose DM
     // already sent but whose public reply never posted (e.g. it hit a rate
