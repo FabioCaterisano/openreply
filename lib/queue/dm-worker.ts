@@ -81,6 +81,18 @@ const NON_TEMPLATE_REJECTIONS = [
   /requested user cannot be found/i,
 ];
 
+// CATNO: Meta subcodes that no retry can fix — the comment is past the private
+// reply window (2534024), the commenter no longer exists (2534014), or the
+// comment can no longer take its single private reply (2534025). The subcode
+// is read from the message because PermissionError does not keep it.
+const PERMANENT_PRIVATE_REPLY_SUBCODES = new Set([2534024, 2534014, 2534025]);
+
+function isPermanentPrivateReplyRejection(error: unknown): boolean {
+  if (error instanceof MetaApiError && error.subcode != null && PERMANENT_PRIVATE_REPLY_SUBCODES.has(error.subcode)) return true;
+  const subcode = (error instanceof Error ? error.message : "").match(/\bsub=(\d+)\b/)?.[1];
+  return subcode != null && PERMANENT_PRIVATE_REPLY_SUBCODES.has(Number(subcode));
+}
+
 function isTemplateRejection(error: unknown): boolean {
   if (
     error instanceof TokenExpiredError ||
@@ -883,6 +895,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           dmDeliveryUnconfirmed: error instanceof ZernioDeliveryUnconfirmedError,
         },
       });
+      if (isPermanentPrivateReplyRejection(error)) dropClaim?.stopRetrying();
       throw error;
     }
     } finally {

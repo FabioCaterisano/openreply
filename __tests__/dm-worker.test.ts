@@ -1817,6 +1817,34 @@ describe("release-safe drop delivery", () => {
     expect(mockSendPrivateReplyWithLinkButton.mock.calls[0][4][0].url).toBe("https://decks.catno.ai/old/?src=dm");
   });
 
+  describe("send failures", () => {
+    const persisted = { id: "origin_555", status: "FAILED", dropRetryAttempts: 2, mediaId: "media_101", dropNumber: 27, dropSlug: "old", dropUrl: "https://decks.catno.ai/old/" };
+    const retryScheduled = () => mockPrisma.dmLog.updateMany.mock.calls.some(([arg]) => arg.data?.dropRetryAt instanceof Date);
+    beforeEach(() => {
+      mockPrisma.dmLog.findUnique.mockResolvedValue(persisted);
+      mockPrisma.dmLog.upsert.mockResolvedValue(persisted);
+    });
+
+    it.each([
+      "According policy for private replies, the comment is too old get a reply. (/v25.0/123/messages) [code=-1 sub=2534024 type=IGApiException trace=-]",
+      "The requested user cannot be found. (/v25.0/123/messages) [code=100 sub=2534014 type=IGApiException trace=-]",
+      "The comment is invalid for a private reply (/v25.0/123/messages) [code=100 sub=2534025 type=IGApiException trace=-]",
+    ])("ends drop retries after a permanent rejection: %s", async (message) => {
+      mockSendPrivateReplyWithLinkButton.mockRejectedValue(new Error(message));
+      mockSendPrivateReply.mockRejectedValue(new Error(message));
+      await expect(getProcessor()(createMockJob(mockJobData))).rejects.toThrow();
+      expect(retryScheduled()).toBe(false);
+      expect(mockPrisma.dmLog.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ dropPending: false, dropRetryAt: null }) }));
+    });
+
+    it("keeps retrying a transient send failure", async () => {
+      mockSendPrivateReplyWithLinkButton.mockRejectedValue(new Error("socket hang up"));
+      mockSendPrivateReply.mockRejectedValue(new Error("socket hang up"));
+      await expect(getProcessor()(createMockJob(mockJobData))).rejects.toThrow();
+      expect(retryScheduled()).toBe(true);
+    });
+  });
+
   it.each([{ status: "SENT" }, { status: "FAILED", dmDeliveryUnconfirmed: true }])("does not resend terminal delivery %j", async (state) => {
     mockPrisma.dmLog.findUnique.mockResolvedValue({ ...state, dropPending: true });
     await getProcessor()(createMockJob(mockJobData));
