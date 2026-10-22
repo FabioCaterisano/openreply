@@ -1,4 +1,5 @@
 import { instagramShortcode, loadDrops, parseDropNumber, type Drop } from "@/lib/drops/catalog";
+import { getReleaseBinding } from "@/lib/drops/bindings";
 
 export type ResolvedDrop = {
   dropNumber: number;
@@ -45,6 +46,11 @@ function match(drops: Drop[], input: ResolveInput): ResolvedDrop | null {
 }
 
 export async function resolveDrop(input: ResolveInput): Promise<ResolvedDrop | null> {
+  let binding: ResolvedDrop | null = null;
+  try { binding = await getReleaseBinding(input.permalink); } catch {
+    // A temporary binding-store outage can still be served by the verified catalog.
+  }
+  if (binding) return input.expectedDropNumber == null || input.expectedDropNumber === binding.dropNumber ? binding : null;
   const first = await loadDrops({ forceRefresh: input.forceRefresh, strict: input.strict });
   const hit = match(first, input);
   if (hit || input.forceRefresh) return hit;

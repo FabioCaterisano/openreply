@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 
 const {
   mockPrisma,
@@ -1675,6 +1675,93 @@ describe("CATNO drop resolution", () => {
     expect(buttons[1].url).toMatch(/\/r\/lib123\?k=27$/);
   });
 
+  describe("reel-specific campaign without a library link", () => {
+    const promptLink = {
+      slug: "prompt100",
+      label: "Primary campaign link",
+      destinationUrl: "https://decks.catno.ai/100-gpt-codes/",
+    };
+    const reelCampaign = {
+      ...mockAutomation,
+      linkButtonLabel: "Zum Prompt",
+      trackedLinks: [promptLink],
+    };
+
+    afterEach(() => {
+      delete process.env.CATNO_DROP_AUTOMATION_IDS;
+    });
+
+    it("sends only its own button although a drop resolves", async () => {
+      mockPrisma.automation.findMany.mockResolvedValue([reelCampaign]);
+
+      await getProcessor()(createMockJob(mockJobData));
+
+      expect(mockSendPrivateReplyWithLinkButton.mock.calls[0][4]).toEqual([
+        { title: "Zum Prompt", url: expect.stringMatching(/\/r\/prompt100\?k=27$/) },
+      ]);
+    });
+
+    it("sends only its own button after a follow-check", async () => {
+      mockGetUserFollowStatus.mockResolvedValue(true);
+      mockPrisma.automation.findFirst.mockResolvedValue({ ...reelCampaign, requireFollow: true });
+      mockPrisma.dmLog.findFirst.mockResolvedValue({
+        id: "origin_555",
+        commenterName: "tester",
+        dropUrl: "https://decks.catno.ai/100-gpt-codes/",
+        dropNumber: 27,
+      });
+
+      await getProcessor()(createMockPostbackJob({
+        instagramAccountId: "ig_456",
+        userId: "commenter_999",
+        payload: "followcheck:v1:auto_789:origin_555",
+      }));
+
+      expect(mockSendDirectMessageWithLinkButton.mock.calls[0][4]).toEqual([
+        { title: "Zum Prompt", url: expect.stringMatching(/\/r\/prompt100\?k=27$/) },
+      ]);
+    });
+
+    it("keeps its link alone in the inline fallback", async () => {
+      mockPrisma.automation.findMany.mockResolvedValue([
+        { ...reelCampaign, dmMessage: "Hier ist dein Prompt: {link}" },
+      ]);
+      mockSendPrivateReplyWithLinkButton.mockRejectedValue(new Error("Unsupported message template"));
+
+      await getProcessor()(createMockJob(mockJobData));
+
+      const text = mockSendPrivateReply.mock.calls[0][3] as string;
+      expect(text.match(/https?:\/\/\S+/g)).toHaveLength(1);
+      expect(text).toMatch(/\/r\/prompt100\?k=27(\s|$)/);
+      expect(text).not.toContain("Drop aus dem Reel");
+    });
+
+    it("adds its own link to the inline fallback when the text has no {link}", async () => {
+      mockPrisma.automation.findMany.mockResolvedValue([
+        { ...reelCampaign, dmMessage: "Hier ist dein Prompt" },
+      ]);
+      mockSendPrivateReplyWithLinkButton.mockRejectedValue(new Error("Unsupported message template"));
+
+      await getProcessor()(createMockJob(mockJobData));
+
+      const text = mockSendPrivateReply.mock.calls[0][3] as string;
+      expect(text).toMatch(/\/r\/prompt100(\?|\s|$)/);
+      expect(text.match(/https?:\/\/\S+/g)).toHaveLength(1);
+    });
+
+    it("still gets the handout when it is listed as a configured drop campaign", async () => {
+      process.env.CATNO_DROP_AUTOMATION_IDS = "auto_789";
+      mockPrisma.automation.findMany.mockResolvedValue([
+        { ...reelCampaign, trackedLinks: [libraryLink], linkButtonLabel: "Alle Drops 🔓" },
+      ]);
+
+      await getProcessor()(createMockJob(mockJobData));
+
+      const buttons = mockSendPrivateReplyWithLinkButton.mock.calls[0][4];
+      expect(buttons[0]).toEqual({ title: "Drop aus dem Reel", url: "https://decks.catno.ai/gpt-weiss-alles/?src=dm" });
+    });
+  });
+
   it("sends only the library button when nothing resolves", async () => {
     mockResolveDrop.mockResolvedValue(null);
     mockGetUserFollowStatus.mockResolvedValue(true);
@@ -1742,6 +1829,43 @@ describe("release-safe drop delivery", () => {
     expect(mockGetMediaDetails).not.toHaveBeenCalled();
     expect(mockResolveDrop).not.toHaveBeenCalled();
     expect(mockSendPrivateReplyWithLinkButton.mock.calls[0][4][0].url).toBe("https://decks.catno.ai/old/?src=dm");
+  });
+
+  describe("send failures", () => {
+    const persisted = { id: "origin_555", status: "FAILED", dropRetryAttempts: 2, mediaId: "media_101", dropNumber: 27, dropSlug: "old", dropUrl: "https://decks.catno.ai/old/" };
+    const retryScheduled = () => mockPrisma.dmLog.updateMany.mock.calls.some(([arg]) => arg.data?.dropRetryAt instanceof Date);
+    beforeEach(() => {
+      mockPrisma.dmLog.findUnique.mockResolvedValue(persisted);
+      mockPrisma.dmLog.upsert.mockResolvedValue(persisted);
+    });
+
+    it.each([
+      "According policy for private replies, the comment is too old get a reply. (/v25.0/123/messages) [code=-1 sub=2534024 type=IGApiException trace=-]",
+      "The requested user cannot be found. (/v25.0/123/messages) [code=100 sub=2534014 type=IGApiException trace=-]",
+      "The comment is invalid for a private reply (/v25.0/123/messages) [code=100 sub=2534025 type=IGApiException trace=-]",
+    ])("ends drop retries after a permanent rejection: %s", async (message) => {
+      mockSendPrivateReplyWithLinkButton.mockRejectedValue(new Error(message));
+      mockSendPrivateReply.mockRejectedValue(new Error(message));
+      await expect(getProcessor()(createMockJob(mockJobData))).rejects.toThrow();
+      expect(retryScheduled()).toBe(false);
+      expect(mockPrisma.dmLog.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ dropPending: false, dropRetryAt: null }) }));
+    });
+
+    it("never claims or sends again after a stored permanent rejection", async () => {
+      mockPrisma.dmLog.findUnique.mockResolvedValue({ ...persisted, dropPending: true, errorMessage: "PermissionError 100: The requested user cannot be found. (/v25.0/123/messages) [code=100 sub=2534014 type=IGApiException trace=-]" });
+      await getProcessor()(createMockJob(mockJobData));
+      expect(mockPrisma.dmLog.upsert).not.toHaveBeenCalled();
+      expect(mockReserveWorkspaceDMSend).not.toHaveBeenCalled();
+      expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
+      expect(mockPrisma.dmLog.updateMany).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ dropPending: false }) }));
+    });
+
+    it("keeps retrying a transient send failure", async () => {
+      mockSendPrivateReplyWithLinkButton.mockRejectedValue(new Error("socket hang up"));
+      mockSendPrivateReply.mockRejectedValue(new Error("socket hang up"));
+      await expect(getProcessor()(createMockJob(mockJobData))).rejects.toThrow();
+      expect(retryScheduled()).toBe(true);
+    });
   });
 
   it.each([{ status: "SENT" }, { status: "FAILED", dmDeliveryUnconfirmed: true }])("does not resend terminal delivery %j", async (state) => {

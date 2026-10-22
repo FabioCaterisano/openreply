@@ -4,6 +4,8 @@ import { getDMQueue, type ProcessCommentJob } from "@/lib/queue/client";
 import type { Prisma } from "@/app/generated/prisma/client";
 
 const LEASE_MS = 5 * 60_000;
+// Instagram accepts a private reply only within seven days of the comment.
+const PRIVATE_REPLY_WINDOW_MS = 7 * 24 * 60 * 60_000;
 const retryable = { status: { in: ["PENDING", "FAILED"] as ("PENDING" | "FAILED")[] }, dmDeliveryUnconfirmed: false };
 
 export function dropRetryDelay(attempt: number): number {
@@ -32,6 +34,7 @@ export async function claimDropComment(data: Prisma.DmLogUncheckedCreateInput, d
   }, data: { ...retrySource, dropPending: true, dropClaimToken: token, dropClaimUntil: new Date(now.getTime() + LEASE_MS), dropRetryAttempts: { increment: 1 } } });
   if (!claimed.count) return null;
   let lost = false;
+  let stopped = false;
   const renew = setInterval(() => {
     void prisma.dmLog.updateMany({ where: { id: log.id, dropClaimToken: token }, data: { dropClaimUntil: new Date(Date.now() + LEASE_MS) } })
       .then(r => { if (!r.count) lost = true; }).catch(() => { lost = true; });
@@ -44,8 +47,15 @@ export async function claimDropComment(data: Prisma.DmLogUncheckedCreateInput, d
       const owned = await prisma.dmLog.updateMany({ where: { id: log.id, dropClaimToken: token, dropClaimUntil: { gt: new Date() }, ...retryable }, data: { dropClaimUntil: new Date(Date.now() + LEASE_MS) } });
       if (!owned.count) throw new Error("Drop claim lost");
     },
+    // A permanent rejection cannot succeed on retry; finish() then ends the pending state.
+    stopRetrying() { stopped = true; },
     async finish() {
       clearInterval(renew);
+      const expired = log.createdAt instanceof Date && Date.now() - log.createdAt.getTime() >= PRIVATE_REPLY_WINDOW_MS;
+      if (stopped || expired) {
+        await prisma.dmLog.updateMany({ where: { id: log.id, dropClaimToken: token }, data: { dropPending: false, dropClaimToken: null, dropClaimUntil: null, dropRetryAt: null } });
+        return;
+      }
       // Due-time ordering keeps an unavailable old reel from starving newer rows.
       await prisma.dmLog.updateMany({ where: { id: log.id, dropClaimToken: token, ...retryable }, data: {
         dropClaimToken: null, dropClaimUntil: null, dropRetryAt: new Date(Date.now() + dropRetryDelay(log.dropRetryAttempts + 1)),

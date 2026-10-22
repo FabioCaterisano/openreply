@@ -81,6 +81,20 @@ const NON_TEMPLATE_REJECTIONS = [
   /requested user cannot be found/i,
 ];
 
+// CATNO: Meta subcodes that no retry can fix — the comment is past the private
+// reply window (2534024), the commenter no longer exists (2534014), or the
+// comment can no longer take its single private reply (2534025). The subcode
+// is read from the message because PermissionError does not keep it.
+const PERMANENT_PRIVATE_REPLY_SUBCODES = new Set([2534024, 2534014, 2534025]);
+
+function isPermanentPrivateReplyRejection(error: unknown): boolean {
+  if (error instanceof MetaApiError && error.subcode != null && PERMANENT_PRIVATE_REPLY_SUBCODES.has(error.subcode)) return true;
+  // Also accepts a stored DmLog.errorMessage, which keeps the "sub=" marker.
+  const message = typeof error === "string" ? error : error instanceof Error ? error.message : "";
+  const subcode = message.match(/\bsub=(\d+)\b/)?.[1];
+  return subcode != null && PERMANENT_PRIVATE_REPLY_SUBCODES.has(Number(subcode));
+}
+
 function isTemplateRejection(error: unknown): boolean {
   if (
     error instanceof TokenExpiredError ||
@@ -126,6 +140,15 @@ function isDropLibraryLink(link: WorkerTrackedLink): boolean {
   } catch {
     return false;
   }
+}
+
+// CATNO: only the drop campaign gets the resolved handout button. Any other
+// campaign (e.g. one set up for a single reel) sends exactly its own links.
+function isDropCampaign(automation: { id: string; trackedLinks: WorkerTrackedLink[] }): boolean {
+  const configuredDropIds = (process.env.CATNO_DROP_AUTOMATION_IDS ?? "").split(",").map(id => id.trim()).filter(Boolean);
+  return configuredDropIds.length > 0
+    ? configuredDropIds.includes(automation.id)
+    : automation.trackedLinks.some(isDropLibraryLink);
 }
 
 /**
@@ -182,10 +205,17 @@ function buildInlineLinkFallback(
   const base =
     renderMessageWithTracking({ message, commenterName, trackedLinks }) ||
     bodyText;
-  const extraUrls = trackedLinks
-    .slice(1)
-    .map((link) => withQuery(buildTrackedUrl(link.slug), override?.query));
-  return extraUrls.length > 0 ? `${base}\n${extraUrls.join("\n")}` : base;
+  // CATNO: the rendered primary link carries no query, so k is added as on the
+  // button; a text without {link} or the destination URL gets the link appended
+  // instead of losing it once the button template is rejected.
+  const primaryUrl = trackedLinks[0] ? buildTrackedUrl(trackedLinks[0].slug) : null;
+  const primaryPattern = primaryUrl ? new RegExp(`${primaryUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w?/-])`, "g") : null;
+  const text = primaryUrl && primaryPattern ? base.replace(primaryPattern, () => withQuery(primaryUrl, override?.query)) : base;
+  const urls = [
+    ...(primaryUrl && !base.includes(primaryUrl) ? [withQuery(primaryUrl, override?.query)] : []),
+    ...trackedLinks.slice(1).map((link) => withQuery(buildTrackedUrl(link.slug), override?.query)),
+  ];
+  return urls.length > 0 ? `${text}\n${urls.join("\n")}` : text;
 }
 
 type RevealAutomation = {
@@ -354,7 +384,13 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
 
     const alreadyDmd = existingLog?.status === "SENT";
     const alreadyPublicReplied = Boolean(existingLog?.publicReplySentAt);
-    const needsDm = !alreadyDmd && !existingLog?.dmDeliveryUnconfirmed;
+    // CATNO: a stored permanent Meta rejection is final, so no webhook, poll,
+    // queue retry or drop sweep may claim or send this DM again.
+    const permanentlyRejected = existingLog?.status === "FAILED" && isPermanentPrivateReplyRejection(existingLog.errorMessage);
+    if (permanentlyRejected && existingLog?.dropPending) {
+      await prisma.dmLog.updateMany({ where: { id: existingLog.id, dropPending: true }, data: { dropPending: false, dropClaimToken: null, dropClaimUntil: null, dropRetryAt: null } });
+    }
+    const needsDm = !alreadyDmd && !existingLog?.dmDeliveryUnconfirmed && !permanentlyRejected;
 
     // Skip only when there is genuinely nothing left to do. A comment whose DM
     // already sent but whose public reply never posted (e.g. it hit a rate
@@ -367,8 +403,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       continue;
     }
 
-    const configuredDropIds = (process.env.CATNO_DROP_AUTOMATION_IDS ?? "").split(",").map(id => id.trim()).filter(Boolean);
-    const dropCampaign = configuredDropIds.length > 0 ? configuredDropIds.includes(automation.id) : automation.trackedLinks.some(isDropLibraryLink);
+    const dropCampaign = isDropCampaign(automation);
     const dropClaim = needsDm && (dropCampaign || existingLog?.dropPending)
       ? await claimDropComment({
           workspaceId: automation.workspaceId, automationId: automation.id, instagramAccountId: automation.instagramAccountId,
@@ -475,7 +510,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
       dropUrl: drop?.handoutUrl ?? null,
     };
     const linkOverride: LinkButtonOverride = {
-      primaryUrl: drop?.handoutUrl ?? null,
+      primaryUrl: dropCampaign ? drop?.handoutUrl ?? null : null,
       query: drop ? { k: String(drop.dropNumber) } : {},
     };
 
@@ -875,6 +910,7 @@ async function processComment(job: Job<ProcessCommentJob>): Promise<void> {
           dmDeliveryUnconfirmed: error instanceof ZernioDeliveryUnconfirmedError,
         },
       });
+      if (isPermanentPrivateReplyRejection(error)) dropClaim?.stopRetrying();
       throw error;
     }
     } finally {
@@ -995,7 +1031,7 @@ async function processPostback(job: Job<ProcessPostbackJob>): Promise<void> {
 
   const commenterName = openingLog?.commenterName ?? null;
   const linkOverride: LinkButtonOverride = {
-    primaryUrl: openingLog?.dropUrl ?? null,
+    primaryUrl: isDropCampaign(automation) ? openingLog?.dropUrl ?? null : null,
     query:
       openingLog?.dropNumber != null
         ? { k: String(openingLog.dropNumber) }

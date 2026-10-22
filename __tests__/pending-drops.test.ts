@@ -129,3 +129,25 @@ it("clears pending state once delivery is complete and refuses an expired claim"
   await claim!.finish();
   expect(row).toMatchObject({ dropPending: false, dropRetryAt: null, dropClaimToken: null });
 });
+
+it("stops retrying after a permanent rejection", async () => {
+  const claim = await claimDropComment(input);
+  claim!.stopRetrying();
+  await claim!.finish();
+  expect(row).toMatchObject({ dropPending: false, dropRetryAt: null, dropClaimToken: null, dropClaimUntil: null });
+});
+
+it("stops retrying once the private reply window has closed", async () => {
+  row.createdAt = new Date("2026-09-06T12:00:00Z");
+  const claim = await claimDropComment(input);
+  await claim!.finish();
+  expect(row).toMatchObject({ dropPending: false, dropRetryAt: null, dropClaimToken: null });
+});
+
+it("keeps retrying inside the private reply window", async () => {
+  row.createdAt = new Date("2026-09-06T12:00:01Z");
+  const claim = await claimDropComment(input);
+  await claim!.finish();
+  expect(row).toMatchObject({ dropPending: true, dropClaimToken: null });
+  expect(row.dropRetryAt).toEqual(new Date("2026-09-13T12:00:30Z"));
+});
