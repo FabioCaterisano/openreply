@@ -205,14 +205,17 @@ function buildInlineLinkFallback(
   const base =
     renderMessageWithTracking({ message, commenterName, trackedLinks }) ||
     bodyText;
-  // CATNO: a text without {link} or the destination URL would otherwise lose
-  // the campaign's own link once the button template is rejected.
+  // CATNO: the rendered primary link carries no query, so k is added as on the
+  // button; a text without {link} or the destination URL gets the link appended
+  // instead of losing it once the button template is rejected.
   const primaryUrl = trackedLinks[0] ? buildTrackedUrl(trackedLinks[0].slug) : null;
+  const primaryPattern = primaryUrl ? new RegExp(`${primaryUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![\\w?/-])`, "g") : null;
+  const text = primaryUrl && primaryPattern ? base.replace(primaryPattern, () => withQuery(primaryUrl, override?.query)) : base;
   const urls = [
     ...(primaryUrl && !base.includes(primaryUrl) ? [withQuery(primaryUrl, override?.query)] : []),
     ...trackedLinks.slice(1).map((link) => withQuery(buildTrackedUrl(link.slug), override?.query)),
   ];
-  return urls.length > 0 ? `${base}\n${urls.join("\n")}` : base;
+  return urls.length > 0 ? `${text}\n${urls.join("\n")}` : text;
 }
 
 type RevealAutomation = {

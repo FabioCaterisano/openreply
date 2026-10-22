@@ -1732,6 +1732,7 @@ describe("CATNO drop resolution", () => {
 
       const text = mockSendPrivateReply.mock.calls[0][3] as string;
       expect(text.match(/https?:\/\/\S+/g)).toHaveLength(1);
+      expect(text).toMatch(/\/r\/prompt100\?k=27(\s|$)/);
       expect(text).not.toContain("Drop aus dem Reel");
     });
 
