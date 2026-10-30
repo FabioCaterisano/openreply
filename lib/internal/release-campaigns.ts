@@ -1,6 +1,7 @@
 import { prisma } from "@/lib/db/client";
 import { instagramShortcode } from "@/lib/drops/catalog";
 import { getMediaDetails, type InstagramContext } from "@/lib/instagram/provider";
+import { IANA_TLDS } from "@/lib/internal/iana-tlds";
 import { ReleaseError, type ReleaseIdentity } from "@/lib/internal/release-auth";
 import { generateReportShareSlug } from "@/lib/reports/share";
 import { generateTrackedLinkSlug } from "@/lib/tracking/server";
@@ -28,15 +29,16 @@ const KEYWORD = /^[A-Z0-9ÄÖÜ]{2,16}$/;
 
 // The only outgoing link of a release campaign is the validated handout button, so DM text and
 // button label must not carry anything a reader could follow or type as an address. Fail closed:
-// plain prose passes, anything domain-, scheme- or handle-like (also defanged/obfuscated) is refused.
+// plain prose passes, anything domain-, scheme-, IP- or handle-like (also defanged/obfuscated) is
+// refused. False positives are accepted on purpose: a sentence break before a word that happens to
+// be a TLD ("Super. Top", "Okay. Info") is rejected too, and the caller has to rephrase. Rejecting
+// is the safe direction; a missed link would reach every commenter.
 const DOT = "[.。｡．․‧∙⋅·•]";
 const SEP = "[\\s._*\\-]*";
-const TLD = "(?:com|net|org|de|eu|at|ch|uk|us|io|ai|co|me|to|ly|cc|tv|gg|sh|li|so|ru|cn|su|xyz|info|biz|app|dev|link|site|online|shop|store|top|click|live|tk|ml|ga|gq|cf|pw|ws)";
 const LINK_LIKE: RegExp[] = [
   new RegExp(`[\\p{L}\\p{N}]${DOT}+[\\p{L}\\p{N}]`, "u"),                // evil.example, еvil.рф, 2.0
   new RegExp(`\\s${DOT}+\\s*[\\p{L}\\p{N}]`, "u"),                       // evil . example, evil .example
   new RegExp(`${DOT}\\s+\\p{Ll}`, "u"),                                  // evil. example (prose continues upper case)
-  new RegExp(`(?:${DOT}|\\b(?:dot|punkt)\\b)\\s*${TLD}(?![\\p{L}\\p{N}])`, "iu"), // evil. Com, evil dot com, evil punkt de
   new RegExp(`[\\[({<]\\s*(?:${DOT}|dot|punkt)\\s*[\\])}>]`, "iu"),      // evil[.]example, evil (dot) example
   new RegExp(`\\p{L}\\s+dot\\s+\\p{L}`, "iu"),                           // evil dot example
   new RegExp(`(?:^|[^\\p{L}])h${SEP}[tx]${SEP}[tx]${SEP}p(?:${SEP}s)?(?![\\p{L}])`, "iu"), // http, hxxps, h t t p
@@ -45,12 +47,35 @@ const LINK_LIKE: RegExp[] = [
   /[:：]\s*\/|\/\s*\//u,                                                 // ://, //
   /xn--/iu,                                                              // punycode IDN
   /[@＠]/u,                                                              // handles, mail addresses
+  new RegExp(`\\d{1,3}(?:\\s*${DOT}\\s*\\d{1,3}){3}`, "u"),              // 1.2.3.4, 1. 2. 3. 4
+  /(?:^|[^\p{L}\p{N}:])[0-9a-f]{0,4}(?::[0-9a-f]{1,4})*::[0-9a-f]{1,4}|(?:^|[^\p{L}\p{N}:])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){7}(?![\p{L}\p{N}])/iu, // ::1, fe80::1
 ];
 
-export function linkLike(text: string): boolean {
+function fold(text: string): string {
   // NFKC folds full-width and compatibility forms; invisible characters must not split a pattern.
-  const folded = text.normalize("NFKC").replace(/[\p{Default_Ignorable_Code_Point}\p{M}\p{Cf}]/gu, "");
-  return LINK_LIKE.some(pattern => pattern.test(folded));
+  return text.normalize("NFKC").replace(/[\p{Default_Ignorable_Code_Point}\p{M}\p{Cf}]/gu, "");
+}
+
+// Every IANA TLD in the same folded, lower-cased form as the text it is compared with.
+const TLDS: ReadonlySet<string> = new Set([...IANA_TLDS].map(tld => fold(tld).toLowerCase()));
+// `<non-space> <dot> <label>`, spaces allowed around the dot, also spelled "dot"/"punkt". The label
+// is the next word, or a run of single characters ("C O M") that a reader would join.
+const DOT_LABEL = new RegExp(
+  `(?<=\\S)\\s*(?:${DOT}+|(?<![\\p{L}\\p{N}])(?:dot|punkt)(?![\\p{L}\\p{N}]))\\s*([\\p{L}\\p{N}]+(?:\\s+[\\p{L}\\p{N}](?![\\p{L}\\p{N}]))*)`,
+  "gu",
+);
+
+function tldAfterDot(folded: string): boolean {
+  for (const [, label] of folded.toLowerCase().matchAll(DOT_LABEL)) {
+    const words = label.split(/\s+/);
+    if (TLDS.has(words[0]) || (words[0].length === 1 && TLDS.has(words.join("")))) return true;
+  }
+  return false;
+}
+
+export function linkLike(text: string): boolean {
+  const folded = fold(text);
+  return LINK_LIKE.some(pattern => pattern.test(folded)) || tldAfterDot(folded);
 }
 
 export function validateCampaign(input: unknown, identity: ReleaseIdentity, accountId: string): ReleaseCampaignInput {
@@ -67,9 +92,12 @@ export function validateCampaign(input: unknown, identity: ReleaseIdentity, acco
       || typeof value.hashtag !== "string" || !policy.captionTag.test(value.hashtag)
       || typeof value.keyword !== "string" || !KEYWORD.test(value.keyword)
       || typeof value.handoutUrl !== "string" || !policy.handoutPattern.test(value.handoutUrl)
-      || !text("dmMessage", 1000) || !text("buttonLabel", 20)
-      || linkLike(value.dmMessage as string) || linkLike(value.buttonLabel as string)) {
+      || !text("dmMessage", 1000) || !text("buttonLabel", 20)) {
     throw new ReleaseError(400, "Invalid release campaign");
+  }
+  if (linkLike(value.dmMessage as string) || linkLike(value.buttonLabel as string)) {
+    throw new ReleaseError(400, "dmMessage and buttonLabel must not contain links, domains, IP addresses or handles; "
+      + "the handout button is the only link. A sentence break before a TLD-like word (e.g. \"Super. Top\") also counts, rephrase it");
   }
   return { accountId, mediaId: value.mediaId, permalink: `https://www.instagram.com/reel/${code}/`, hashtag: value.hashtag,
     keyword: value.keyword, handoutUrl: value.handoutUrl, dmMessage: value.dmMessage as string, buttonLabel: value.buttonLabel as string };
@@ -119,16 +147,29 @@ function sameCampaign(campaign: StoredCampaign, input: ReleaseCampaignInput): bo
     && campaign.trackedLinks.length === 1 && campaign.trackedLinks[0].destinationUrl === input.handoutUrl;
 }
 
-export async function listReleaseCampaigns(instagramAccountId: string, mediaId: string) {
-  if (!/^\d{1,32}$/.test(mediaId)) throw new ReleaseError(400, "Invalid media id");
-  const campaigns = await prisma.automation.findMany({ where: { instagramAccountId, postId: mediaId }, select: SELECT, orderBy: { createdAt: "asc" } });
-  return campaigns.map(campaignView);
+/**
+ * Every campaign that can answer a comment on the reel: those bound to it, plus the account's active
+ * any-post campaigns (the worker matches them on every post) and next-reel campaigns (they bind to
+ * whatever reel is published next).
+ */
+function competingWhere(instagramAccountId: string, mediaId: string) {
+  return { instagramAccountId, OR: [{ postId: mediaId }, { isActive: true, matchAnyPost: true }, { isActive: true, pendingNextReel: true }] };
 }
 
 /**
- * More than one active campaign on the reel. The advisory lock only serialises this endpoint; the
- * session UI (create, import) writes without it and there is no unique constraint, so a racing UI
- * write is detected here instead of prevented. The client blocks on it.
+ * Readback: `campaigns` are the ones bound to the reel; `duplicate` also counts the account's active
+ * any-post and next-reel campaigns, since each of them would DM the same commenter a second time.
+ */
+export async function listReleaseCampaigns(instagramAccountId: string, mediaId: string) {
+  if (!/^\d{1,32}$/.test(mediaId)) throw new ReleaseError(400, "Invalid media id");
+  const competing = await prisma.automation.findMany({ where: competingWhere(instagramAccountId, mediaId), select: SELECT, orderBy: { createdAt: "asc" } });
+  return { campaigns: competing.filter(campaign => campaign.postId === mediaId).map(campaignView), duplicate: hasDuplicate(competing) };
+}
+
+/**
+ * More than one active campaign answers the reel. The advisory lock only serialises this endpoint;
+ * the session UI (create, import) writes without it and there is no unique constraint, so a racing UI
+ * write (bound to the reel or any-post) is detected here instead of prevented. The client blocks on it.
  */
 export function hasDuplicate(campaigns: { isActive: boolean }[]): boolean {
   return campaigns.filter(campaign => campaign.isActive).length > 1;
@@ -141,7 +182,7 @@ export async function ensureReleaseCampaign(
 ): Promise<{ created: boolean; duplicate: boolean; campaign: ReturnType<typeof campaignView> }> {
   const result = await writeReleaseCampaign(account, identity, input);
   // Read after commit so writes that committed meanwhile from other paths are visible.
-  return { ...result, duplicate: hasDuplicate(await listReleaseCampaigns(account.id, input.mediaId)) };
+  return { ...result, duplicate: (await listReleaseCampaigns(account.id, input.mediaId)).duplicate };
 }
 
 async function writeReleaseCampaign(
@@ -152,12 +193,11 @@ async function writeReleaseCampaign(
   return prisma.$transaction(async tx => {
     // Serialises concurrent creates for one reel; released with the transaction.
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${`release-campaign:${account.id}:${input.mediaId}`}::text))`;
-    const competing = await tx.automation.findMany({
-      where: { instagramAccountId: account.id, OR: [{ postId: input.mediaId }, { isActive: true, matchAnyPost: true }, { isActive: true, pendingNextReel: true }] },
-      select: SELECT, orderBy: { createdAt: "asc" },
-    });
-    // An any-post or next-reel campaign would answer the same comments a second time.
-    if (competing.some(c => c.postId !== input.mediaId)) throw new ReleaseError(409, "Account has an any-post or next-reel campaign");
+    const competing = await tx.automation.findMany({ where: competingWhere(account.id, input.mediaId), select: SELECT, orderBy: { createdAt: "asc" } });
+    // An active any-post or next-reel campaign would answer the same comments a second time.
+    if (competing.some(c => c.isActive && (c.matchAnyPost || c.pendingNextReel || c.postId !== input.mediaId))) {
+      throw new ReleaseError(409, "Account has an any-post or next-reel campaign");
+    }
     if (competing.length === 1 && sameCampaign(competing[0], input)) return { created: false, campaign: campaignView(competing[0]) };
     if (competing.length > 0) throw new ReleaseError(409, "Reel already has a different campaign");
     const campaign = await tx.automation.create({

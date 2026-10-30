@@ -55,9 +55,11 @@ beforeEach(() => {
   m.media.mockResolvedValue({ id: BODY.mediaId, permalink: "https://www.instagram.com/reel/KIBY12/", caption: "TV einrichten. Kommentiere TV. #kibybyte12 #ki" });
   m.fetch.mockResolvedValue(new Response(null, { status: 200 }));
   m.page.mockResolvedValue({ data: [], after: null });
-  m.findMany.mockImplementation(async ({ where }: { where: { instagramAccountId: string; postId?: string; OR?: object[] } }) =>
+  // Evaluates the `OR` clauses like Prisma: a row matches when every field of one clause is equal.
+  m.findMany.mockImplementation(async ({ where }: { where: { instagramAccountId: string; postId?: string; OR?: Record<string, unknown>[] } }) =>
     stored.filter(c => c.instagramAccountId === where.instagramAccountId
-      && (where.postId ? c.postId === where.postId : c.postId === BODY.mediaId || c.matchAnyPost || c.pendingNextReel)));
+      && (where.postId === undefined || c.postId === where.postId)
+      && (!where.OR || where.OR.some(clause => Object.entries(clause).every(([key, value]) => c[key] === value)))));
   m.create.mockImplementation(async (input: Parameters<typeof stub>[0]) => { const c = stub(input); stored.push(c); return c; });
   m.transaction.mockImplementation(async (fn: (tx: unknown) => unknown) =>
     fn({ $executeRaw: m.executeRaw, automation: { findMany: m.findMany, create: m.create } }));
@@ -139,7 +141,8 @@ describe("idempotent per-reel campaign", () => {
 
     const readback = await (await campaignsGET(get(`/campaigns?mediaId=${BODY.mediaId}`))).json();
     expect(readback).toMatchObject({ success: true, accountId: "kiby_ig", connectionId: "kiby_conn", data: [{ id: created.data.id }] });
-    expect(m.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: { instagramAccountId: "kiby_conn", postId: BODY.mediaId } }));
+    expect(m.findMany).toHaveBeenLastCalledWith(expect.objectContaining({ where: { instagramAccountId: "kiby_conn",
+      OR: [{ postId: BODY.mediaId }, { isActive: true, matchAnyPost: true }, { isActive: true, pendingNextReel: true }] } }));
   });
 
   it.each([
@@ -251,6 +254,23 @@ describe("DM text carries no link besides the validated handout", () => {
     "Mail an mailto:evil",
     "Ruf an tel:+49123",
     "javascript:alert(1)",
+    // Any IANA TLD after a dot, whatever stands before it and however the dot is spaced or cased.
+    "Besuch 💩.la",
+    "Besuch evil. COMPUTER",
+    "Besuch evil . COMPUTER",
+    "Besuch example . de",
+    "Besuch evil．COMPUTER",
+    "Besuch 💩 ． la",
+    "Besuch evil\u200B. \u200BCOMPUTER",
+    "Besuch evil.\u200DLA",
+    "Besuch evil. C O M",
+    "Besuch evil. РФ",
+    "Besuch evil Punkt COMPUTER",
+    "Besuch ★. Shop",
+    // IP addresses.
+    "Geh auf 192.168.0.1",
+    "Geh auf 192. 168. 0. 1",
+    "Geh auf fe80::1",
   ])("rejects link-like DM text %j", async dmMessage => {
     const response = await campaignsPOST(post({ ...BODY, dmMessage }));
     expect(response.status).toBe(400);
@@ -258,15 +278,28 @@ describe("DM text carries no link besides the validated handout", () => {
     expect(m.create).not.toHaveBeenCalled();
   });
 
-  it.each(["evil.example", "www evil", "hxxp evil", "@evil"])("rejects link-like button label %j", async buttonLabel => {
+  it.each(["evil.example", "www evil", "hxxp evil", "@evil", "💩.la", "Hi. COMPUTER", "x . de"])("rejects link-like button label %j", async buttonLabel => {
     expect((await campaignsPOST(post({ ...BODY, buttonLabel }))).status).toBe(400);
     expect(m.create).not.toHaveBeenCalled();
+  });
+
+  it("tells the caller that links and domains are not allowed in DM text", async () => {
+    const response = await campaignsPOST(post({ ...BODY, dmMessage: "Besuch 💩.la" }));
+    expect(response.status).toBe(400);
+    expect((await response.json()).error).toMatch(/must not contain links, domains/);
+  });
+
+  it("rejects a sentence break before a TLD-like word on purpose", async () => {
+    expect((await campaignsPOST(post({ ...BODY, dmMessage: "Super. Top Anleitung!" }))).status).toBe(400);
   });
 
   it.each([
     "Hier ist deine Schritt-für-Schritt-Anleitung aus dem Reel. Viel Spaß beim Ausprobieren!",
     "Danke fürs Kommentieren! Tipp: Speicher dir die Anleitung. Sie hilft beim Einrichten.",
     "Punkt für Punkt erklärt, ganz ohne Fachchinesisch.",
+    "Schritt 1: Einstellungen öffnen. Schritt 2: Fernseher verbinden. Fertig!",
+    "Kurz und knapp 💡 Viel Erfolg beim Nachmachen",
+    "Um 12:30 Uhr geht's los. Bis gleich",
   ])("accepts plain prose %j", async dmMessage => {
     expect((await campaignsPOST(post({ ...BODY, dmMessage }))).status).toBe(201);
   });
@@ -282,6 +315,48 @@ describe("duplicate campaigns from other write paths are reported", () => {
     });
     const body = await (await campaignsPOST(post(BODY))).json();
     expect(body).toMatchObject({ success: true, created: true, duplicate: true });
+  });
+
+  it("create reports duplicate when an active any-post campaign appears meanwhile", async () => {
+    // A UI any-post campaign committed after our pre-check; the worker would answer with both.
+    m.create.mockImplementationOnce(async (input: Parameters<typeof stub>[0]) => {
+      const c = stub(input); stored.push(c);
+      stored.push({ id: "ui-any", instagramAccountId: "kiby_conn", postId: null, matchAnyPost: true, pendingNextReel: false, isActive: true, trackedLinks: [] });
+      return c;
+    });
+    const body = await (await campaignsPOST(post(BODY))).json();
+    expect(body).toMatchObject({ success: true, created: true, duplicate: true, data: { postId: BODY.mediaId } });
+  });
+
+  it("readback reports an active any-post or next-reel campaign as duplicate, not an inactive one", async () => {
+    expect((await campaignsPOST(post(BODY))).status).toBe(201);
+    const readback = async () => (await campaignsGET(get(`/campaigns?mediaId=${BODY.mediaId}`))).json();
+    stored.push({ id: "any-off", instagramAccountId: "kiby_conn", postId: null, matchAnyPost: true, pendingNextReel: false, isActive: false, trackedLinks: [] });
+    expect(await readback()).toMatchObject({ duplicate: false, data: [{ id: "camp1" }] });
+    stored.push({ id: "next-on", instagramAccountId: "kiby_conn", postId: null, matchAnyPost: false, pendingNextReel: true, isActive: true, trackedLinks: [] });
+    expect(await readback()).toMatchObject({ duplicate: true });
+    stored.pop();
+    stored.push({ id: "any-on", instagramAccountId: "kiby_conn", postId: null, matchAnyPost: true, pendingNextReel: false, isActive: true, trackedLinks: [] });
+    const body = await readback();
+    // `data` stays the reel's own campaigns; the any-post one only raises the flag.
+    expect(body).toMatchObject({ duplicate: true, data: [{ id: "camp1" }] });
+    expect(body.data).toHaveLength(1);
+  });
+
+  it("ignores any-post campaigns of another account", async () => {
+    stored.push({ id: "catno-any", instagramAccountId: "catno_conn", postId: null, matchAnyPost: true, pendingNextReel: false, isActive: true, trackedLinks: [] });
+    const body = await (await campaignsPOST(post(BODY))).json();
+    expect(body).toMatchObject({ created: true, duplicate: false });
+  });
+
+  it("refuses a create while an active any-post campaign exists, but not an inactive one", async () => {
+    stored.push({ id: "any-off", instagramAccountId: "kiby_conn", postId: null, matchAnyPost: true, pendingNextReel: false, isActive: false, trackedLinks: [] });
+    expect((await campaignsPOST(post(BODY))).status).toBe(201);
+    stored.length = 0;
+    stored.push({ id: "any-on", instagramAccountId: "kiby_conn", postId: null, matchAnyPost: true, pendingNextReel: false, isActive: true, trackedLinks: [] });
+    const refused = await campaignsPOST(post(BODY));
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toMatchObject({ committed: false, error: "Account has an any-post or next-reel campaign" });
   });
 
   it("readback reports duplicate for more than one active campaign, not for an inactive extra", async () => {
