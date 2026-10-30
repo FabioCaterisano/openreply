@@ -3,7 +3,7 @@ import { decodeMediaCursor, encodeMediaCursor, releaseAccess, releaseFailure, Re
 
 export async function GET(request: Request) {
   try {
-    const { account, context } = await releaseAccess(request);
+    const { account, context } = await releaseAccess(request, "media");
     const params = new URL(request.url).searchParams;
     const limit = Number(params.get("limit") ?? "100");
     if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw new ReleaseError(400, "Invalid limit");
