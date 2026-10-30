@@ -48,7 +48,8 @@ const LINK_LIKE: RegExp[] = [
   /xn--/iu,                                                              // punycode IDN
   /[@＠]/u,                                                              // handles, mail addresses
   new RegExp(`\\d{1,3}(?:\\s*${DOT}\\s*\\d{1,3}){3}`, "u"),              // 1.2.3.4, 1. 2. 3. 4
-  /(?:^|[^\p{L}\p{N}:])[0-9a-f]{0,4}(?::[0-9a-f]{1,4})*::[0-9a-f]{1,4}|(?:^|[^\p{L}\p{N}:])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){7}(?![\p{L}\p{N}])/iu, // ::1, fe80::1
+  // Compressed IPv6 (any groups around `::`, also none: "::", "fe80::") or the full eight groups.
+  /(?:^|[^\p{L}\p{N}:])[0-9a-f]{0,4}(?::[0-9a-f]{1,4})*::|(?:^|[^\p{L}\p{N}:])[0-9a-f]{1,4}(?::[0-9a-f]{1,4}){7}(?![\p{L}\p{N}])/iu, // ::1, fe80::, 2606:4700::
 ];
 
 function fold(text: string): string {
@@ -117,33 +118,66 @@ export async function verifyHandout(url: string): Promise<void> {
   if (page.status !== 200) throw new ReleaseError(409, "Handout is not publicly available");
 }
 
-type StoredCampaign = {
-  id: string; name: string; postId: string | null; postUrl: string | null; keywords: string[]; matchAnyWord: boolean;
-  matchAnyPost: boolean; pendingNextReel: boolean; dmTriggerEnabled: boolean; dmMessage: string; linkButtonLabel: string | null;
-  isActive: boolean; createdAt: Date; trackedLinks: { destinationUrl: string }[];
+/** Every campaign field the DM worker reads when it answers a comment or DM (lib/queue/dm-worker.ts). */
+type ExecutionFields = {
+  postId: string | null; pendingNextReel: boolean; matchAnyPost: boolean; keywords: string[]; matchAnyWord: boolean;
+  wholeWordMatch: boolean; dmTriggerEnabled: boolean; dmMessage: string; linkButtonLabel: string | null;
+  openingDmEnabled: boolean; openingDmMessage: string | null; openingDmButtonLabel: string | null;
+  requireFollow: boolean; followPromptMessage: string | null; followPromptButtonLabel: string | null;
+  followUpEnabled: boolean; followUpMessage: string | null; followUpDelayMinutes: number;
+  publicReplyEnabled: boolean; publicReplyMessage: string | null; publicReplyMessages: string[]; isActive: boolean;
 };
 
-const SELECT = {
-  id: true, name: true, postId: true, postUrl: true, keywords: true, matchAnyWord: true, matchAnyPost: true,
-  pendingNextReel: true, dmTriggerEnabled: true, dmMessage: true, linkButtonLabel: true, isActive: true, createdAt: true,
-  trackedLinks: { select: { destinationUrl: true }, orderBy: { createdAt: "asc" as const } },
-};
-
-export function campaignView(campaign: StoredCampaign) {
+/**
+ * The execution fields exactly as this endpoint creates them: one keyword DM with the handout button,
+ * nothing else (no opening DM, follow gate, follow-up or public reply). The create path writes this
+ * object and the idempotency check compares against it, so the two cannot drift apart.
+ */
+function executionFields(input: ReleaseCampaignInput): ExecutionFields {
   return {
-    id: campaign.id, name: campaign.name, postId: campaign.postId, postUrl: campaign.postUrl, keywords: campaign.keywords,
-    matchAnyWord: campaign.matchAnyWord, matchAnyPost: campaign.matchAnyPost, pendingNextReel: campaign.pendingNextReel,
-    dmTriggerEnabled: campaign.dmTriggerEnabled, dmMessage: campaign.dmMessage, buttonLabel: campaign.linkButtonLabel,
-    isActive: campaign.isActive, handoutUrls: campaign.trackedLinks.map(link => link.destinationUrl),
-    createdAt: campaign.createdAt.toISOString(),
+    postId: input.mediaId, pendingNextReel: false, matchAnyPost: false, keywords: [input.keyword], matchAnyWord: false,
+    wholeWordMatch: true, dmTriggerEnabled: false, dmMessage: input.dmMessage, linkButtonLabel: input.buttonLabel,
+    openingDmEnabled: false, openingDmMessage: null, openingDmButtonLabel: null,
+    requireFollow: false, followPromptMessage: null, followPromptButtonLabel: null,
+    followUpEnabled: false, followUpMessage: null, followUpDelayMinutes: 0,
+    publicReplyEnabled: false, publicReplyMessage: null, publicReplyMessages: [], isActive: true,
   };
 }
 
+// `satisfies` fails the build when a field of ExecutionFields is not selected (or one is misspelt).
+const EXECUTION_SELECT = {
+  postId: true, pendingNextReel: true, matchAnyPost: true, keywords: true, matchAnyWord: true,
+  wholeWordMatch: true, dmTriggerEnabled: true, dmMessage: true, linkButtonLabel: true,
+  openingDmEnabled: true, openingDmMessage: true, openingDmButtonLabel: true,
+  requireFollow: true, followPromptMessage: true, followPromptButtonLabel: true,
+  followUpEnabled: true, followUpMessage: true, followUpDelayMinutes: true,
+  publicReplyEnabled: true, publicReplyMessage: true, publicReplyMessages: true, isActive: true,
+} as const satisfies Record<keyof ExecutionFields, true>;
+const EXECUTION_KEYS = Object.keys(EXECUTION_SELECT) as (keyof ExecutionFields)[];
+
+type StoredCampaign = ExecutionFields & {
+  id: string; name: string; postUrl: string | null; createdAt: Date; trackedLinks: { destinationUrl: string }[];
+};
+
+const SELECT = {
+  id: true, name: true, postUrl: true, createdAt: true, ...EXECUTION_SELECT,
+  trackedLinks: { select: { destinationUrl: true }, orderBy: { createdAt: "asc" as const } },
+};
+
+/** Shows every execution field, so a readback exposes any deviation from what this endpoint creates. */
+export function campaignView(campaign: StoredCampaign) {
+  const { linkButtonLabel, ...execution } = Object.fromEntries(EXECUTION_KEYS.map(key => [key, campaign[key]])) as ExecutionFields;
+  return {
+    id: campaign.id, name: campaign.name, postUrl: campaign.postUrl, ...execution, buttonLabel: linkButtonLabel,
+    handoutUrls: campaign.trackedLinks.map(link => link.destinationUrl), createdAt: campaign.createdAt.toISOString(),
+  };
+}
+
+/** Fail closed: any execution field that differs from a fresh create (e.g. an added opening DM) is a different campaign. */
 function sameCampaign(campaign: StoredCampaign, input: ReleaseCampaignInput): boolean {
-  return campaign.postId === input.mediaId && instagramShortcode(campaign.postUrl) === instagramShortcode(input.permalink)
-    && campaign.keywords.length === 1 && campaign.keywords[0] === input.keyword && !campaign.matchAnyWord
-    && !campaign.matchAnyPost && !campaign.pendingNextReel && !campaign.dmTriggerEnabled
-    && campaign.dmMessage === input.dmMessage && campaign.linkButtonLabel === input.buttonLabel
+  const expected = executionFields(input);
+  return instagramShortcode(campaign.postUrl) === instagramShortcode(input.permalink)
+    && EXECUTION_KEYS.every(key => JSON.stringify(campaign[key] ?? null) === JSON.stringify(expected[key]))
     && campaign.trackedLinks.length === 1 && campaign.trackedLinks[0].destinationUrl === input.handoutUrl;
 }
 
@@ -204,10 +238,7 @@ async function writeReleaseCampaign(
       data: {
         workspaceId: account.workspaceId, instagramAccountId: account.id,
         name: `${identity.campaign!.label} ${input.hashtag} · ${input.keyword}`, goal: "Lead magnet delivery",
-        postId: input.mediaId, postUrl: input.permalink, pendingNextReel: false, matchAnyPost: false,
-        keywords: [input.keyword], matchAnyWord: false, dmTriggerEnabled: false, wholeWordMatch: true,
-        dmMessage: input.dmMessage, linkButtonLabel: input.buttonLabel, isActive: true,
-        reportShareSlug: generateReportShareSlug(),
+        postUrl: input.permalink, ...executionFields(input), reportShareSlug: generateReportShareSlug(),
         trackedLinks: { create: [{ workspaceId: account.workspaceId, slug: generateTrackedLinkSlug(), label: "Primary campaign link", destinationUrl: input.handoutUrl }] },
       },
       select: SELECT,

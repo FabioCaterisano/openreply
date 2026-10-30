@@ -157,6 +157,51 @@ describe("idempotent per-reel campaign", () => {
     expect(m.create).toHaveBeenCalledTimes(1);
   });
 
+  it.each([
+    ["an opening DM", { openingDmEnabled: true, openingDmMessage: "https://evil.example", openingDmButtonLabel: "Los" }],
+    ["an opening DM text while disabled", { openingDmMessage: "https://evil.example" }],
+    ["an opening DM button label", { openingDmButtonLabel: "Los" }],
+    ["a follow gate", { requireFollow: true }],
+    ["a follow prompt", { followPromptMessage: "Folge erst" }],
+    ["a follow prompt button", { followPromptButtonLabel: "Gefolgt" }],
+    ["a follow-up", { followUpEnabled: true, followUpMessage: "https://evil.example" }],
+    ["a follow-up text while disabled", { followUpMessage: "Und?" }],
+    ["a follow-up delay", { followUpDelayMinutes: 5 }],
+    ["a public reply", { publicReplyEnabled: true }],
+    ["a public reply text", { publicReplyMessage: "Schau in die DMs" }],
+    ["public reply variants", { publicReplyMessages: ["Check DMs"] }],
+    ["substring matching", { wholeWordMatch: false }],
+    ["any-word matching", { matchAnyWord: true }],
+    ["a DM trigger", { dmTriggerEnabled: true }],
+    ["a second keyword", { keywords: ["TV", "FERNSEHER"] }],
+    ["a deactivated campaign", { isActive: false }],
+    ["a second tracked link", { trackedLinks: [{ destinationUrl: BODY.handoutUrl }, { destinationUrl: "https://evil.example" }] }],
+  ])("answers 409 when the stored campaign has %s and shows it in the readback", async (_label, change) => {
+    expect((await campaignsPOST(post(BODY))).status).toBe(201);
+    Object.assign(stored[0], change);
+    const conflict = await campaignsPOST(post(BODY));
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ success: false, committed: false, error: "Reel already has a different campaign" });
+    expect(m.create).toHaveBeenCalledTimes(1);
+    const { trackedLinks, ...fields } = change as Record<string, unknown>;
+    const readback = await (await campaignsGET(get(`/campaigns?mediaId=${BODY.mediaId}`))).json();
+    expect(readback.data[0]).toMatchObject(trackedLinks ? { handoutUrls: [BODY.handoutUrl, "https://evil.example"] } : fields);
+  });
+
+  it("creates every execution field with its release value and exposes it in the readback", async () => {
+    const created = await (await campaignsPOST(post(BODY))).json();
+    const expected = {
+      postId: BODY.mediaId, pendingNextReel: false, matchAnyPost: false, keywords: ["TV"], matchAnyWord: false, wholeWordMatch: true,
+      dmTriggerEnabled: false, dmMessage: BODY.dmMessage, buttonLabel: BODY.buttonLabel, openingDmEnabled: false, openingDmMessage: null,
+      openingDmButtonLabel: null, requireFollow: false, followPromptMessage: null, followPromptButtonLabel: null, followUpEnabled: false,
+      followUpMessage: null, followUpDelayMinutes: 0, publicReplyEnabled: false, publicReplyMessage: null, publicReplyMessages: [],
+      isActive: true, handoutUrls: [BODY.handoutUrl],
+    };
+    expect(created.data).toMatchObject(expected);
+    expect((await (await campaignsGET(get(`/campaigns?mediaId=${BODY.mediaId}`))).json()).data[0]).toMatchObject(expected);
+    expect(created.data).not.toHaveProperty("linkButtonLabel");
+  });
+
   it("refuses when an any-post or next-reel campaign could answer the same comment", async () => {
     stored.push({ id: "manual", instagramAccountId: "kiby_conn", postId: null, matchAnyPost: true, isActive: true, trackedLinks: [] });
     expect((await campaignsPOST(post(BODY))).status).toBe(409);
@@ -271,6 +316,10 @@ describe("DM text carries no link besides the validated handout", () => {
     "Geh auf 192.168.0.1",
     "Geh auf 192. 168. 0. 1",
     "Geh auf fe80::1",
+    "Geh auf fe80::",
+    "Besuch [2606:4700:4700::]",
+    "Besuch 2606:4700:4700::",
+    "Besuch ::",
   ])("rejects link-like DM text %j", async dmMessage => {
     const response = await campaignsPOST(post({ ...BODY, dmMessage }));
     expect(response.status).toBe(400);
