@@ -49,7 +49,7 @@ const LINK_LIKE: RegExp[] = [
 
 export function linkLike(text: string): boolean {
   // NFKC folds full-width and compatibility forms; invisible characters must not split a pattern.
-  const folded = text.normalize("NFKC").replace(/[­​-‏⁠-⁤﻿]/g, "");
+  const folded = text.normalize("NFKC").replace(/[\p{Default_Ignorable_Code_Point}\p{M}\p{Cf}]/gu, "");
   return LINK_LIKE.some(pattern => pattern.test(folded));
 }
 
