@@ -4,7 +4,7 @@ import { releaseAccess, releaseFailure, ReleaseError } from "@/lib/internal/rele
 
 export async function GET(request: Request) {
   try {
-    const { account } = await releaseAccess(request);
+    const { account } = await releaseAccess(request, "resolve");
     const params = new URL(request.url).searchParams;
     const permalink = params.get("permalink");
     const dropNumber = Number(params.get("dropNumber"));

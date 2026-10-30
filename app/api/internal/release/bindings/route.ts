@@ -6,7 +6,7 @@ import { releaseAccess, releaseFailure, ReleaseError } from "@/lib/internal/rele
 // It verifies public registry classification independently of catalog/cover publication.
 export async function POST(request: Request) {
   try {
-    const { account } = await releaseAccess(request);
+    const { account } = await releaseAccess(request, "bindings");
     const text = await request.text();
     if (text.length > 16_384) throw new ReleaseError(413, "Binding payload is too large");
     let input: unknown;
