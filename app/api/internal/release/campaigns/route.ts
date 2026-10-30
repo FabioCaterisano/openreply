@@ -1,5 +1,5 @@
 import { releaseAccess, releaseFailure, ReleaseError } from "@/lib/internal/release-auth";
-import { ensureReleaseCampaign, listReleaseCampaigns, validateCampaign, verifyHandout, verifyReleaseMedia } from "@/lib/internal/release-campaigns";
+import { ensureReleaseCampaign, hasDuplicate, listReleaseCampaigns, validateCampaign, verifyHandout, verifyReleaseMedia } from "@/lib/internal/release-campaigns";
 
 const NO_STORE = { "Cache-Control": "no-store" };
 
@@ -25,8 +25,8 @@ export async function POST(request: Request) {
     await verifyReleaseMedia(context, identity, input);
     await verifyHandout(input.handoutUrl);
     writing = true;
-    const { created, campaign } = await ensureReleaseCampaign(account, identity, input);
-    return Response.json({ success: true, committed: true, created, accountId: account.instagramId, connectionId: account.id, data: campaign },
+    const { created, duplicate, campaign } = await ensureReleaseCampaign(account, identity, input);
+    return Response.json({ success: true, committed: true, created, duplicate, accountId: account.instagramId, connectionId: account.id, data: campaign },
       { status: created ? 201 : 200, headers: NO_STORE });
   } catch (error) { return failure(error, !writing || error instanceof ReleaseError ? false : undefined); }
 }
@@ -36,6 +36,7 @@ export async function GET(request: Request) {
   try {
     const { account } = await releaseAccess(request, "campaigns");
     const data = await listReleaseCampaigns(account.id, new URL(request.url).searchParams.get("mediaId") ?? "");
-    return Response.json({ success: true, accountId: account.instagramId, connectionId: account.id, data }, { headers: NO_STORE });
+    return Response.json({ success: true, accountId: account.instagramId, connectionId: account.id, duplicate: hasDuplicate(data), data },
+      { headers: NO_STORE });
   } catch (error) { return releaseFailure(error); }
 }

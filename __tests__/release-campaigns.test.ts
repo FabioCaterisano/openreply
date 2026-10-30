@@ -214,3 +214,80 @@ describe("release campaign verification", () => {
     expect((await campaignsGET(get("/campaigns?mediaId=abc"))).status).toBe(400);
   });
 });
+
+describe("DM text carries no link besides the validated handout", () => {
+  it.each([
+    "Hier: https://evil.example/phishing",
+    "Hier: http://evil.example",
+    "Hier: hxxp://evil.example",
+    "Hier: hxxps evil",
+    "Geh auf h t t p s evil",
+    "Geh auf HTTP colon evil",
+    "Hier: //evil.example",
+    "Besuch www.evil.example",
+    "Besuch w w w evil",
+    "Besuch evil.example",
+    "Besuch evil.de",
+    "Besuch EVIL.COM",
+    "Besuch evil . example",
+    "Besuch evil .example",
+    "Besuch evil. example",
+    "Besuch evil. Com",
+    "Besuch evil[.]example",
+    "Besuch evil(.)example",
+    "Besuch evil [dot] example",
+    "Besuch evil dot com",
+    "Besuch evil punkt de",
+    "Besuch evil．example",
+    "Besuch evil。example",
+    "Besuch evil​.​example",
+    "Besuch еvil.рф",
+    "Besuch пример.испытание",
+    "Besuch xn--e1afmkfd",
+    "Schreib @evilhandle",
+    "Mail an mailto:evil",
+    "Ruf an tel:+49123",
+    "javascript:alert(1)",
+  ])("rejects link-like DM text %j", async dmMessage => {
+    const response = await campaignsPOST(post({ ...BODY, dmMessage }));
+    expect(response.status).toBe(400);
+    expect(m.media).not.toHaveBeenCalled();
+    expect(m.create).not.toHaveBeenCalled();
+  });
+
+  it.each(["evil.example", "www evil", "hxxp evil", "@evil"])("rejects link-like button label %j", async buttonLabel => {
+    expect((await campaignsPOST(post({ ...BODY, buttonLabel }))).status).toBe(400);
+    expect(m.create).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "Hier ist deine Schritt-für-Schritt-Anleitung aus dem Reel. Viel Spaß beim Ausprobieren!",
+    "Danke fürs Kommentieren! Tipp: Speicher dir die Anleitung. Sie hilft beim Einrichten.",
+    "Punkt für Punkt erklärt, ganz ohne Fachchinesisch.",
+  ])("accepts plain prose %j", async dmMessage => {
+    expect((await campaignsPOST(post({ ...BODY, dmMessage }))).status).toBe(201);
+  });
+});
+
+describe("duplicate campaigns from other write paths are reported", () => {
+  it("create reports duplicate when another active campaign appears on the reel", async () => {
+    // A UI create that raced past the advisory lock lands after our insert.
+    m.create.mockImplementationOnce(async (input: Parameters<typeof stub>[0]) => {
+      const c = stub(input); stored.push(c);
+      stored.push({ ...c, id: "ui-race", name: "UI" });
+      return c;
+    });
+    const body = await (await campaignsPOST(post(BODY))).json();
+    expect(body).toMatchObject({ success: true, created: true, duplicate: true });
+  });
+
+  it("readback reports duplicate for more than one active campaign, not for an inactive extra", async () => {
+    expect((await campaignsPOST(post(BODY))).status).toBe(201);
+    const single = await (await campaignsGET(get(`/campaigns?mediaId=${BODY.mediaId}`))).json();
+    expect(single.duplicate).toBe(false);
+    stored.push({ ...stored[0], id: "ui-off", isActive: false });
+    expect((await (await campaignsGET(get(`/campaigns?mediaId=${BODY.mediaId}`))).json()).duplicate).toBe(false);
+    stored.push({ ...stored[0], id: "ui-on", isActive: true });
+    expect((await (await campaignsGET(get(`/campaigns?mediaId=${BODY.mediaId}`))).json()).duplicate).toBe(true);
+  });
+});

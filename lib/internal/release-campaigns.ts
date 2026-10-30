@@ -26,6 +26,33 @@ export type ReleaseCampaignInput = {
 const FIELDS = ["accountId", "mediaId", "permalink", "hashtag", "keyword", "handoutUrl", "dmMessage", "buttonLabel"] as const;
 const KEYWORD = /^[A-Z0-9ÄÖÜ]{2,16}$/;
 
+// The only outgoing link of a release campaign is the validated handout button, so DM text and
+// button label must not carry anything a reader could follow or type as an address. Fail closed:
+// plain prose passes, anything domain-, scheme- or handle-like (also defanged/obfuscated) is refused.
+const DOT = "[.。｡．․‧∙⋅·•]";
+const SEP = "[\\s._*\\-]*";
+const TLD = "(?:com|net|org|de|eu|at|ch|uk|us|io|ai|co|me|to|ly|cc|tv|gg|sh|li|so|ru|cn|su|xyz|info|biz|app|dev|link|site|online|shop|store|top|click|live|tk|ml|ga|gq|cf|pw|ws)";
+const LINK_LIKE: RegExp[] = [
+  new RegExp(`[\\p{L}\\p{N}]${DOT}+[\\p{L}\\p{N}]`, "u"),                // evil.example, еvil.рф, 2.0
+  new RegExp(`\\s${DOT}+\\s*[\\p{L}\\p{N}]`, "u"),                       // evil . example, evil .example
+  new RegExp(`${DOT}\\s+\\p{Ll}`, "u"),                                  // evil. example (prose continues upper case)
+  new RegExp(`(?:${DOT}|\\b(?:dot|punkt)\\b)\\s*${TLD}(?![\\p{L}\\p{N}])`, "iu"), // evil. Com, evil dot com, evil punkt de
+  new RegExp(`[\\[({<]\\s*(?:${DOT}|dot|punkt)\\s*[\\])}>]`, "iu"),      // evil[.]example, evil (dot) example
+  new RegExp(`\\p{L}\\s+dot\\s+\\p{L}`, "iu"),                           // evil dot example
+  new RegExp(`(?:^|[^\\p{L}])h${SEP}[tx]${SEP}[tx]${SEP}p(?:${SEP}s)?(?![\\p{L}])`, "iu"), // http, hxxps, h t t p
+  new RegExp(`(?:^|[^\\p{L}])w${SEP}w${SEP}w(?![\\p{L}])`, "iu"),        // www, w w w
+  /(?:^|[^\p{L}])(?:ftp|mailto|tel|sms|javascript|data|file|intent|whatsapp|tg|itms[a-z-]*)\s*[:：]/iu,
+  /[:：]\s*\/|\/\s*\//u,                                                 // ://, //
+  /xn--/iu,                                                              // punycode IDN
+  /[@＠]/u,                                                              // handles, mail addresses
+];
+
+export function linkLike(text: string): boolean {
+  // NFKC folds full-width and compatibility forms; invisible characters must not split a pattern.
+  const folded = text.normalize("NFKC").replace(/[­​-‏⁠-⁤﻿]/g, "");
+  return LINK_LIKE.some(pattern => pattern.test(folded));
+}
+
 export function validateCampaign(input: unknown, identity: ReleaseIdentity, accountId: string): ReleaseCampaignInput {
   const policy = identity.campaign;
   if (!policy) throw new ReleaseError(403, "Forbidden for this release identity");
@@ -40,7 +67,8 @@ export function validateCampaign(input: unknown, identity: ReleaseIdentity, acco
       || typeof value.hashtag !== "string" || !policy.captionTag.test(value.hashtag)
       || typeof value.keyword !== "string" || !KEYWORD.test(value.keyword)
       || typeof value.handoutUrl !== "string" || !policy.handoutPattern.test(value.handoutUrl)
-      || !text("dmMessage", 1000) || !text("buttonLabel", 20)) {
+      || !text("dmMessage", 1000) || !text("buttonLabel", 20)
+      || linkLike(value.dmMessage as string) || linkLike(value.buttonLabel as string)) {
     throw new ReleaseError(400, "Invalid release campaign");
   }
   return { accountId, mediaId: value.mediaId, permalink: `https://www.instagram.com/reel/${code}/`, hashtag: value.hashtag,
@@ -97,7 +125,26 @@ export async function listReleaseCampaigns(instagramAccountId: string, mediaId: 
   return campaigns.map(campaignView);
 }
 
+/**
+ * More than one active campaign on the reel. The advisory lock only serialises this endpoint; the
+ * session UI (create, import) writes without it and there is no unique constraint, so a racing UI
+ * write is detected here instead of prevented. The client blocks on it.
+ */
+export function hasDuplicate(campaigns: { isActive: boolean }[]): boolean {
+  return campaigns.filter(campaign => campaign.isActive).length > 1;
+}
+
 export async function ensureReleaseCampaign(
+  account: { id: string; workspaceId: string },
+  identity: ReleaseIdentity,
+  input: ReleaseCampaignInput,
+): Promise<{ created: boolean; duplicate: boolean; campaign: ReturnType<typeof campaignView> }> {
+  const result = await writeReleaseCampaign(account, identity, input);
+  // Read after commit so writes that committed meanwhile from other paths are visible.
+  return { ...result, duplicate: hasDuplicate(await listReleaseCampaigns(account.id, input.mediaId)) };
+}
+
+async function writeReleaseCampaign(
   account: { id: string; workspaceId: string },
   identity: ReleaseIdentity,
   input: ReleaseCampaignInput,
