@@ -647,7 +647,7 @@ describe("DM Worker — Full Pipeline", () => {
       {
         ...mockAutomation,
         requireFollow: true,
-        followPromptMessage: "Fast 👀 Der Drop ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht die Liste sofort raus. 💜",
+        followPromptMessage: "Fast 👀 Das Handout ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht das Handout sofort raus. 💜",
         followPromptButtonLabel: "Ich folge dir ✔\uFE0F",
         publicReplyEnabled: true,
         publicReplyMessage: "Check deine DMs 😃",
@@ -668,7 +668,7 @@ describe("DM Worker — Full Pipeline", () => {
       "decrypted_token",
       "ig_456",
       "comment_555",
-      "Fast 👀 Der Drop ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht die Liste sofort raus. 💜",
+      "Fast 👀 Das Handout ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht das Handout sofort raus. 💜",
       "Ich folge dir ✔\uFE0F",
       "followcheck:v1:auto_789:origin_555"
     );
