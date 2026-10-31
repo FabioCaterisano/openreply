@@ -130,8 +130,9 @@ type ExecutionFields = {
 
 // Follow gate and public comment reply of a release campaign. These mirror the live CATNO campaigns,
 // verified 2026-10-31 (reply.catno.ai GET /api/automations, all 4 campaigns of @catno.ai identical);
-// copied verbatim, they name no channel. Changing them makes every existing release campaign a 409.
-const FOLLOW_PROMPT_MESSAGE = "Fast 👀 Der Drop ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht die Liste sofort raus. 💜";
+// copied verbatim except the follow prompt, where "Drop"/"Liste" became "Handout" for KIbyByte (Fabio 2026-10-31, variant b).
+// Changing them makes every existing release campaign a 409.
+const FOLLOW_PROMPT_MESSAGE = "Fast 👀 Das Handout ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht das Handout sofort raus. 💜";
 const FOLLOW_PROMPT_BUTTON_LABEL = "Ich folge dir ✔\uFE0F";
 const PUBLIC_REPLY_MESSAGE = "Check deine DMs 😃";
 const PUBLIC_REPLY_MESSAGES = ["Check deine DMs 😃", "Ist raus ✅", "Hab's dir geschickt 📩"];

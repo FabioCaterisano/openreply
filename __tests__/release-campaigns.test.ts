@@ -30,7 +30,7 @@ const BODY = {
 // Follow gate and public reply of the live CATNO campaigns (reply.catno.ai GET /api/automations, 2026-10-31).
 const CATNO_GATE = {
   requireFollow: true,
-  followPromptMessage: "Fast 👀 Der Drop ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht die Liste sofort raus. 💜",
+  followPromptMessage: "Fast 👀 Das Handout ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht das Handout sofort raus. 💜",
   followPromptButtonLabel: "Ich folge dir ✔\uFE0F",
   publicReplyEnabled: true,
   publicReplyMessage: "Check deine DMs 😃",
