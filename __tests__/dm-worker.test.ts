@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { sendCommentReply as mockSendCommentReply } from "@/lib/meta/client";
 
 const {
   mockPrisma,
@@ -635,6 +636,45 @@ describe("DM Worker — Full Pipeline", () => {
       "I'm following ✅",
       "followcheck:v1:auto_789:origin_555"
     );
+    expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
+    expect(mockSendPrivateReply).not.toHaveBeenCalled();
+  });
+
+  it("release campaign shape (public reply + follow gate + handout button): reply first, then the prompt, no link", async () => {
+    // Field values as lib/internal/release-campaigns.ts creates them (mirrors the live CATNO campaigns).
+    mockGetUserFollowStatus.mockResolvedValue(false);
+    mockPrisma.automation.findMany.mockResolvedValue([
+      {
+        ...mockAutomation,
+        requireFollow: true,
+        followPromptMessage: "Fast 👀 Der Drop ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht die Liste sofort raus. 💜",
+        followPromptButtonLabel: "Ich folge dir ✔\uFE0F",
+        publicReplyEnabled: true,
+        publicReplyMessage: "Check deine DMs 😃",
+        publicReplyMessages: ["Check deine DMs 😃", "Ist raus ✅", "Hab's dir geschickt 📩"],
+        dmMessage: "Hier ist deine Anleitung.",
+        linkButtonLabel: "Anleitung öffnen",
+        trackedLinks: [{ slug: "abc123", label: "Primary campaign link", destinationUrl: "https://handouts.kibybyte.de/012-tv-start/" }],
+      },
+    ]);
+
+    await getProcessor()(createMockJob());
+
+    expect(vi.mocked(mockSendCommentReply)).toHaveBeenCalledTimes(1);
+    const [, repliedTo, replyText] = vi.mocked(mockSendCommentReply).mock.calls[0];
+    expect(repliedTo).toBe("comment_555");
+    expect(["Check deine DMs 😃", "Ist raus ✅", "Hab's dir geschickt 📩"]).toContain(replyText);
+    expect(mockSendPrivateReplyWithButton).toHaveBeenCalledWith(
+      "decrypted_token",
+      "ig_456",
+      "comment_555",
+      "Fast 👀 Der Drop ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht die Liste sofort raus. 💜",
+      "Ich folge dir ✔\uFE0F",
+      "followcheck:v1:auto_789:origin_555"
+    );
+    // The public reply is posted before the DM leg.
+    expect(vi.mocked(mockSendCommentReply).mock.invocationCallOrder[0])
+      .toBeLessThan(mockSendPrivateReplyWithButton.mock.invocationCallOrder[0]);
     expect(mockSendPrivateReplyWithLinkButton).not.toHaveBeenCalled();
     expect(mockSendPrivateReply).not.toHaveBeenCalled();
   });
