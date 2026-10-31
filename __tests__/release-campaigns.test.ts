@@ -27,6 +27,15 @@ const BODY = {
   accountId: "kiby_ig", mediaId: "18000000000000001", permalink: "https://www.instagram.com/reel/KIBY12/", hashtag: "#kibybyte12",
   keyword: "TV", handoutUrl: "https://handouts.kibybyte.de/012-tv-start/", dmMessage: "Hier ist deine Anleitung.", buttonLabel: "Anleitung öffnen",
 };
+// Follow gate and public reply of the live CATNO campaigns (reply.catno.ai GET /api/automations, 2026-10-31).
+const CATNO_GATE = {
+  requireFollow: true,
+  followPromptMessage: "Fast 👀 Der Drop ist reserviert, aber ich sehe noch keinen Follow. Tipp oben auf meinen Namen, drück Folgen und komm zurück. Dann geht die Liste sofort raus. 💜",
+  followPromptButtonLabel: "Ich folge dir ✔\uFE0F",
+  publicReplyEnabled: true,
+  publicReplyMessage: "Check deine DMs 😃",
+  publicReplyMessages: ["Check deine DMs 😃", "Ist raus ✅", "Hab's dir geschickt 📩"],
+};
 type Stored = Record<string, unknown> & { trackedLinks: { destinationUrl: string }[] };
 let stored: Stored[];
 
@@ -161,15 +170,17 @@ describe("idempotent per-reel campaign", () => {
     ["an opening DM", { openingDmEnabled: true, openingDmMessage: "https://evil.example", openingDmButtonLabel: "Los" }],
     ["an opening DM text while disabled", { openingDmMessage: "https://evil.example" }],
     ["an opening DM button label", { openingDmButtonLabel: "Los" }],
-    ["a follow gate", { requireFollow: true }],
-    ["a follow prompt", { followPromptMessage: "Folge erst" }],
-    ["a follow prompt button", { followPromptButtonLabel: "Gefolgt" }],
+    ["no follow gate", { requireFollow: false }],
+    ["a different follow prompt", { followPromptMessage: "Folge erst" }],
+    ["no follow prompt", { followPromptMessage: null }],
+    ["a different follow prompt button", { followPromptButtonLabel: "Gefolgt" }],
     ["a follow-up", { followUpEnabled: true, followUpMessage: "https://evil.example" }],
     ["a follow-up text while disabled", { followUpMessage: "Und?" }],
     ["a follow-up delay", { followUpDelayMinutes: 5 }],
-    ["a public reply", { publicReplyEnabled: true }],
-    ["a public reply text", { publicReplyMessage: "Schau in die DMs" }],
-    ["public reply variants", { publicReplyMessages: ["Check DMs"] }],
+    ["no public reply", { publicReplyEnabled: false }],
+    ["a different public reply text", { publicReplyMessage: "Schau in die DMs" }],
+    ["different public reply variants", { publicReplyMessages: ["Check DMs"] }],
+    ["reordered public reply variants", { publicReplyMessages: ["Ist raus ✅", "Check deine DMs 😃", "Hab's dir geschickt 📩"] }],
     ["substring matching", { wholeWordMatch: false }],
     ["any-word matching", { matchAnyWord: true }],
     ["a DM trigger", { dmTriggerEnabled: true }],
@@ -193,13 +204,37 @@ describe("idempotent per-reel campaign", () => {
     const expected = {
       postId: BODY.mediaId, pendingNextReel: false, matchAnyPost: false, keywords: ["TV"], matchAnyWord: false, wholeWordMatch: true,
       dmTriggerEnabled: false, dmMessage: BODY.dmMessage, buttonLabel: BODY.buttonLabel, openingDmEnabled: false, openingDmMessage: null,
-      openingDmButtonLabel: null, requireFollow: false, followPromptMessage: null, followPromptButtonLabel: null, followUpEnabled: false,
-      followUpMessage: null, followUpDelayMinutes: 0, publicReplyEnabled: false, publicReplyMessage: null, publicReplyMessages: [],
+      openingDmButtonLabel: null, ...CATNO_GATE, followUpEnabled: false, followUpMessage: null, followUpDelayMinutes: 0,
       isActive: true, handoutUrls: [BODY.handoutUrl],
     };
     expect(created.data).toMatchObject(expected);
     expect((await (await campaignsGET(get(`/campaigns?mediaId=${BODY.mediaId}`))).json()).data[0]).toMatchObject(expected);
     expect(created.data).not.toHaveProperty("linkButtonLabel");
+  });
+
+  it("gates the handout behind a follow and replies publicly, with the texts of the live CATNO campaigns", async () => {
+    const created = await (await campaignsPOST(post(BODY))).json();
+    expect(created.data).toEqual(expect.objectContaining(CATNO_GATE));
+    expect(m.create.mock.calls[0][0].data).toEqual(expect.objectContaining(CATNO_GATE));
+    // Button titles are capped at 20 characters by Meta.
+    expect(CATNO_GATE.followPromptButtonLabel.length).toBeLessThanOrEqual(20);
+    // Repeating the request with the gated fields stored is idempotent.
+    const again = await campaignsPOST(post(BODY));
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ created: false, data: { id: created.data.id, ...CATNO_GATE } });
+    expect(m.create).toHaveBeenCalledTimes(1);
+  });
+
+  it("answers 409 for a campaign stored with the earlier ungated release fields and leaves it unchanged", async () => {
+    expect((await campaignsPOST(post(BODY))).status).toBe(201);
+    const legacy = { requireFollow: false, followPromptMessage: null, followPromptButtonLabel: null,
+      publicReplyEnabled: false, publicReplyMessage: null, publicReplyMessages: [] };
+    Object.assign(stored[0], legacy);
+    const conflict = await campaignsPOST(post(BODY));
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ committed: false, error: "Reel already has a different campaign" });
+    expect(m.create).toHaveBeenCalledTimes(1);
+    expect(stored[0]).toMatchObject(legacy);
   });
 
   it("refuses when an any-post or next-reel campaign could answer the same comment", async () => {
