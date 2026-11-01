@@ -1939,6 +1939,16 @@ describe("release-safe drop delivery", () => {
     expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
   });
 
+  it("sends nothing when the origin log was already deleted by retention", async () => {
+    mockPrisma.automation.findFirst.mockResolvedValue(campaign);
+    mockPrisma.dmLog.findFirst.mockResolvedValue(null);
+    await getProcessor()(createMockPostbackJob({ instagramAccountId: "ig_456", userId: "commenter_999", payload: "reveal:v1:auto_789:origin_purged" }));
+    expect(mockSendDirectMessageWithLinkButton).not.toHaveBeenCalled();
+    expect(mockSendDirectMessage).not.toHaveBeenCalled();
+    expect(mockSendDirectMessageWithButton).not.toHaveBeenCalled();
+    expect(mockPrisma.dmLog.upsert).not.toHaveBeenCalled();
+  });
+
   it("accepts a legacy button only for exactly one original", async () => {
     mockPrisma.automation.findFirst.mockResolvedValue(campaign);
     mockPrisma.dmLog.findMany.mockResolvedValue([{ id: "one" }, { id: "two" }]);
