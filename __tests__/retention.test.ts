@@ -16,6 +16,7 @@ const { tables } = vi.hoisted(() => ({
 function matches(row: Row, where: Where): boolean {
   return Object.entries(where).every(([key, cond]) => {
     if (key === "OR") return (cond as Where[]).some((w) => matches(row, w));
+    if (key === "AND") return (cond as Where[]).every((w) => matches(row, w));
     const value = row[key];
     if (cond === null) return value == null;
     if (typeof cond === "object" && cond !== null) {
@@ -97,6 +98,60 @@ describe("purgeExpiredPersonalData", () => {
     ];
     await purgeExpiredPersonalData({ now: NOW });
     expect(tables.dmLog.map((r) => r.id)).toEqual(["claimed"]);
+  });
+
+  // Race: a worker claims (or re-claims) a selected row between the SELECT and
+  // the DELETE. The row must survive; its unclaimed neighbours must not.
+  describe.each([
+    ["acquired", null],
+    ["renewed", daysAgo(99)],
+  ] as const)("drop claim %s between SELECT and DELETE", (_label, initialClaim) => {
+    it("keeps the claimed row, deletes the others, and a later run deletes it once the claim ends", async () => {
+      tables.dmLog = [
+        { id: "raced", createdAt: daysAgo(100), dropClaimUntil: initialClaim },
+        { id: "free1", createdAt: daysAgo(100), dropClaimUntil: null },
+        { id: "free2", createdAt: daysAgo(100), dropClaimUntil: daysAgo(98) },
+      ];
+      const claimUntil = new Date(NOW.getTime() + 5 * 60_000);
+      const model = mockPrisma.dmLog as ReturnType<typeof fakeModel>;
+      const realFindMany = model.findMany.getMockImplementation()!;
+      model.findMany.mockImplementationOnce(async (args) => {
+        const selected = await realFindMany(args);
+        expect(selected.map((r) => r.id)).toContain("raced");
+        // Concurrent pending-drop sweep takes its five-minute lease.
+        tables.dmLog.find((r) => r.id === "raced")!.dropClaimUntil = claimUntil;
+        return selected;
+      });
+
+      const first = await purgeExpiredPersonalData({ now: NOW });
+      expect(first.dmLogsDeleted).toBe(2);
+      expect(tables.dmLog.map((r) => r.id)).toEqual(["raced"]);
+
+      // While the claim is live a second run leaves it alone.
+      const during = await purgeExpiredPersonalData({ now: new Date(NOW.getTime() + 60_000) });
+      expect(during.dmLogsDeleted).toBe(0);
+      expect(tables.dmLog.map((r) => r.id)).toEqual(["raced"]);
+
+      // After the claim expired the row is deleted.
+      const after = await purgeExpiredPersonalData({ now: new Date(claimUntil.getTime() + 1) });
+      expect(after.dmLogsDeleted).toBe(1);
+      expect(tables.dmLog).toEqual([]);
+    });
+  });
+
+  it("re-checks age and claim inside the DELETE statement", async () => {
+    tables.dmLog = [{ id: "old", createdAt: daysAgo(100), dropClaimUntil: null }];
+    await purgeExpiredPersonalData({ now: NOW });
+    const [[args]] = (mockPrisma.dmLog as ReturnType<typeof fakeModel>).deleteMany.mock.calls;
+    expect(args.where).toEqual({
+      AND: [
+        { id: { in: ["old"] } },
+        {
+          createdAt: { lt: retentionCutoff(NOW) },
+          OR: [{ dropClaimUntil: null }, { dropClaimUntil: { lt: NOW } }],
+        },
+      ],
+    });
   });
 
   it("deletes old webhook payloads, operational events, processed comments and postback claims", async () => {

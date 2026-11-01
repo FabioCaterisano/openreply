@@ -71,7 +71,11 @@ export async function purgeExpiredPersonalData({
   };
   const dmLogsDeleted = await inBatches(
     (take) => prisma.dmLog.findMany({ where: dmLogWhere, select: { id: true }, take }),
-    (ids) => prisma.dmLog.deleteMany({ where: { id: { in: ids } } }),
+    // Re-check age and claim inside the DELETE itself: a worker may acquire or
+    // renew a drop claim between the SELECT above and this statement. The
+    // database evaluates the predicate per row at delete time, so a row that
+    // got claimed in between is skipped and picked up by a later run.
+    (ids) => prisma.dmLog.deleteMany({ where: { AND: [{ id: { in: ids } }, dmLogWhere] } }),
     batchSize
   );
 
