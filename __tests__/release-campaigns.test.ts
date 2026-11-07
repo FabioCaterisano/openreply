@@ -77,7 +77,6 @@ afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
 
 describe("release identities are isolated", () => {
   it("KIbyByte token cannot use CATNO-only routes or touch the CATNO account", async () => {
-    expect((await mediaGET(get("/media"))).status).toBe(403);
     expect((await resolveGET(get("/resolve?permalink=https://instagram.com/reel/POST/&dropNumber=27"))).status).toBe(403);
     const binding = new Request("https://reply.catno.ai/api/internal/release/bindings", { method: "POST", headers: { authorization: KIBY }, body: "{}" });
     expect((await bindingsPOST(binding)).status).toBe(403);
@@ -89,6 +88,14 @@ describe("release identities are isolated", () => {
     expect(m.account).not.toHaveBeenCalledWith({ where: { instagramId: "catno_ig" } });
     expect(m.media).not.toHaveBeenCalled();
     expect(m.transaction).not.toHaveBeenCalled();
+  });
+
+  it("KIbyByte token may read media (connection health check), only of its own account", async () => {
+    const media = await mediaGET(get("/media?limit=1"));
+    expect(media.status).toBe(200);
+    expect(await media.json()).toMatchObject({ accountId: "kiby_ig", connectionId: "kiby_conn" });
+    expect(m.account).toHaveBeenCalledWith({ where: { instagramId: "kiby_ig" } });
+    expect(m.account).not.toHaveBeenCalledWith({ where: { instagramId: "catno_ig" } });
   });
 
   it("CATNO token cannot create or read campaigns and keeps its own routes on its own account", async () => {

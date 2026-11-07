@@ -24,7 +24,7 @@ export type ReleaseIdentity = {
 // request parameter. CATNO keeps its original scopes and env names unchanged.
 export const RELEASE_IDENTITIES: readonly ReleaseIdentity[] = [
   { name: "catno", secretEnv: "CATNO_RELEASE_SECRET", accountEnv: "CATNO_RELEASE_INSTAGRAM_ACCOUNT_ID", scopes: ["media", "resolve", "bindings"] },
-  { name: "kibybyte", secretEnv: "KIBYBYTE_RELEASE_SECRET", accountEnv: "KIBYBYTE_RELEASE_INSTAGRAM_ACCOUNT_ID", scopes: ["campaigns"],
+  { name: "kibybyte", secretEnv: "KIBYBYTE_RELEASE_SECRET", accountEnv: "KIBYBYTE_RELEASE_INSTAGRAM_ACCOUNT_ID", scopes: ["campaigns", "media"],
     campaign: { label: "KIbyByte", handoutPattern: /^https:\/\/handouts\.kibybyte\.de\/[0-9]{3,4}-[a-z0-9][a-z0-9-]{0,80}\/$/, captionTag: /^#kibybyte[1-9][0-9]{0,3}$/ } },
 ];
 
